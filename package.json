@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-m10-mold-personal",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "M10 AI 模具·个人版：node:sqlite 本地库、零外部依赖、单人离线。阶段 1 仅落数据层骨架（adapter/schema/迁移/冒烟探针），插件入口与 cordis.patch.yml 在阶段 2 接线。",
   "type": "module",

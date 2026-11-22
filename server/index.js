@@ -383,15 +383,20 @@ async function probeLanAlive(baseUrl, apiPrefix) {
  * 主机 IANA 时区（阶段 5 多时区显示层锚点）：库内 datetime 是主机本地墙钟（jsonNorm 用 UTC 取值器输出无偏移 yyyy-MM-dd HH:mm:ss），
  * 前端需知道这堵墙钟属于哪个时区才能正确换算到浏览设备时区。取运行本插件的 Node 进程 OS 时区，纯新增、异常回空串。
  */
-/** 本机首个非内部 IPv4（多端 IP 漂移提醒 v0.2.0）：供设置页对比 grant 记录的 IP，判断局域网 IP 是否已变。 */
+/** 本机真实局域网 IPv4（多端 IP 显示/漂移）：Node 枚举顺序会把代理/VPN 的 TUN 网卡（如 Mihomo/Clash 的
+ * 198.18/198.19 基准段）排在真局域网之前，故先剔除链路本地与代理基准段，再优先私有网段（192.168/10/172.16-31）。 */
 function hostLanIp() {
   try {
     const ifaces = os.networkInterfaces()
+    const cands = []
     for (const k of Object.keys(ifaces)) {
       for (const a of ifaces[k] || []) {
-        if ((a.family === 'IPv4' || a.family === 4) && !a.internal && !String(a.address).startsWith('169.254.')) return String(a.address)
+        if ((a.family === 'IPv4' || a.family === 4) && !a.internal) cands.push(String(a.address))
       }
     }
+    const usable = cands.filter((ip) => !ip.startsWith('169.254.') && !/^198\.(18|19)\./.test(ip))
+    const isPrivate = (ip) => /^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+    return usable.find(isPrivate) || usable[0] || ''
   } catch { /* ignore */ }
   return ''
 }
