@@ -235,3 +235,22 @@ Invoke-WebRequest -Uri 'http://<本机IP>:3081/m10-mold-personal/api/version' -U
 
 - 版本权威 = `package.json` 的 `version` + git tag；运行时版本回声见 `/m10-mold-personal/api/version`（它直接读安装目录里的 `package.json`）
 - 本仓内容由开发仓的插件包目录逐字节拷贝后入库，**两处受控差异**：① `cordis.patch.yml` 里一行注释做了脱敏（去掉内部账套名），有效配置行与开发仓逐行等同（已由脚本比对）；② 发布仓从 v0.1.2 起重排为「仓库根 = 插件包」（原本在子目录里），且 `version` 以发布仓为准——因为宿主的 git 安装是把整个仓库交给 pnpm、由 pnpm 读仓库根 `package.json`，子目录布局下贴地址装不上。前端源码（TypeScript/TSX）不随本仓发布，故**本仓不含前端重建能力**——需要改界面请在开发仓构建后替换 `client.js`。
+
+
+## 多端 / 当主机（局域网手机访问）
+
+桌面 App 形态的宿主固定只监听 127.0.0.1，手机无法访问，这是宿主设计而非安装失败。要让某台电脑成为局域网主机：
+
+1. 该电脑需装 Node.js（>=22）与 DeepSeek Harness Web 形态宿主目录（含 `apps/cli/src/bin.ts` 与 `node_modules`，可从主机电脑整体复制）。
+2. 在桌面 App「插件管理」粘贴本仓库地址安装插件（本包即插件，已完成可跳过）。
+3. 运行随包脚本（脚本在插件安装目录，一般为 `%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-plugin-m10-mold-personal\scripts\personalLan.ps1`）：
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File <插件安装目录>\scripts\personalLan.ps1 start
+   ```
+
+   脚本自动：探测本机局域网 IP → 起 personal 实例 → 登记授权文件（设置页二维码免登录的关键）→ 检查防火墙（创建规则失败时以管理员运行一次即可）。
+4. 手机/其它设备在同一路由器下打开 `http://<本机局域网IP>:3081`，或刷新桌面 App 设置页扫自动生成的二维码。
+
+`stop / status / autostart（开机自启）/ unautostart` 同理替换末尾动作；可选参数 `-Port`、`-IP`、`-HostRoot`。
+多份数据口径：每台电脑各自一套本地账套；要共享同一份数据，其它设备直接用浏览器访问主机地址即可，无需重复安装。
