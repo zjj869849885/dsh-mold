@@ -6,7 +6,7 @@
 //   GET  /version /pages /org
 //   POST /filter /data /billinit /detail /save /billstatus /image /popdata /item /itemdo /colset
 // 失败一律如实上抛为 {ok:false,message}（W4），不做防御性兜底。
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
@@ -25,9 +25,9 @@ const PKG = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8'))
 const UPDATE_REPO_URL = 'https://github.com/zjj869849885/m10-mold-personal.git'
 // 国内网络对 raw.githubusercontent 不通很常见（本机 2026-11-22 实测超时），按候选顺序降级探测并记住通的那条。
 const UPDATE_RAW_URLS = [
-  'https://raw.githubusercontent.com/zjj869849885/m10-mold-personal/master/package.json',
-  'https://cdn.jsdelivr.net/gh/zjj869849885/m10-mold-personal@master/package.json',
   'https://api.github.com/repos/zjj869849885/m10-mold-personal/contents/package.json',
+  'https://cdn.jsdelivr.net/gh/zjj869849885/m10-mold-personal@master/package.json',
+  'https://raw.githubusercontent.com/zjj869849885/m10-mold-personal/master/package.json',
 ]
 let updateGoodUrl = null
 /** 逐个抓发布仓 package.json 取 version；成功记住该 URL，全败抛出最后错误（路由如实 ok:false，绝不假报）。 */
@@ -53,6 +53,50 @@ async function fetchLatestPkgVersion() {
   }
   throw lastErr || new Error('all update urls failed')
 }
+const UPDATE_OWNER_REPO = 'zjj869849885/m10-mold-personal'
+const UPDATE_META = new Set(['.gitignore', '.gitattributes'])
+/** 解析发布仓 master 最新 commit SHA：api.github 权威（内容随 SHA 不可变，杜绝 jsdelivr @master 边缘缓存返回旧文件）。 */
+async function resolveRemoteSha() {
+  const u = `https://api.github.com/repos/${UPDATE_OWNER_REPO}/commits/master`
+  const r = await fetch(u, { signal: AbortSignal.timeout(8000), headers: { 'cache-control': 'no-cache', 'user-agent': 'm10-update', accept: 'application/vnd.github+json' } })
+  if (!r.ok) throw new Error('resolve sha HTTP ' + r.status)
+  const j = await r.json()
+  const sha = String(j.sha || '')
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error('resolve sha invalid')
+  return sha
+}
+/** 发布仓文件清单（按 SHA）：api.github git trees 权威，jsdelivr flat 降级。返回相对路径数组（无前导斜杠）。 */
+async function fetchRemoteFileList(sha) {
+  try {
+    const gu = `https://api.github.com/repos/${UPDATE_OWNER_REPO}/git/trees/${sha}?recursive=1`
+    const gr = await fetch(gu, { signal: AbortSignal.timeout(8000), headers: { 'cache-control': 'no-cache', 'user-agent': 'm10-update' } })
+    if (gr.ok) {
+      const gj = await gr.json()
+      const names = (gj.tree || []).filter((t) => t.type === 'blob').map((t) => String(t.path)).filter((p) => p && !UPDATE_META.has(p))
+      if (names.length) return names
+    }
+  } catch { /* 落降级 */ }
+  const u = `https://data.jsdelivr.com/v1/packages/gh/${UPDATE_OWNER_REPO}@${sha}?structure=flat`
+  const r = await fetch(u, { signal: AbortSignal.timeout(8000) })
+  if (!r.ok) throw new Error('file list HTTP ' + r.status)
+  const j = await r.json()
+  return (j.files || []).map((f) => String(f.name || '').replace(/^\/+/, '')).filter((n) => n && !UPDATE_META.has(n))
+}
+/** 下载单个文件（按 SHA 不可变）：jsdelivr CDN@sha 优先（内容随 SHA 固定，绝不返回旧缓存），降级 api.github contents base64。 */
+async function fetchRemoteFile(sha, rel) {
+  const cdn = `https://cdn.jsdelivr.net/gh/${UPDATE_OWNER_REPO}@${sha}/${rel}`
+  try {
+    const r = await fetch(cdn, { signal: AbortSignal.timeout(15000) })
+    if (r.ok) return Buffer.from(await r.arrayBuffer())
+  } catch { /* 落降级 */ }
+  const api = `https://api.github.com/repos/${UPDATE_OWNER_REPO}/contents/${rel}?ref=${sha}`
+  const r2 = await fetch(api, { signal: AbortSignal.timeout(15000), headers: { 'cache-control': 'no-cache', 'user-agent': 'm10-update' } })
+  if (!r2.ok) return null
+  const meta = await r2.json()
+  const b64 = String(meta.content || '').replace(/\s+/g, '')
+  return Buffer.from(b64, 'base64')
+}
+
 const UPDATE_TTL_MS = 10 * 60 * 1000
 let updCache = null
 /** 三段式 semver 比较 a<b（缺段按 0）；仅数值段有效，预发布后缀忽略——发布仓约定纯 x.y.z。 */
@@ -428,6 +472,35 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
       sendJson(res, 200, { ok: true, ...updCache.body })
     } catch (e) {
       sendJson(res, 200, { ok: false, current: PKG.version, message: '无法获取最新版本（网络不通或仓库未发布）：' + String((e && e.message) || e) })
+    }
+  }
+
+  // /update-apply：自主更新——从发布仓按最新 commit SHA 拉取全部文件覆盖目标目录（生产=插件根；测试用环境变量 M10_UPDATE_TARGET 指向沙箱）。
+  // SHA 固定下载杜绝旧缓存；仅覆盖清单内文件，拒绝 .. 逃逸与元文件；服务端改动需重启生效，client.js 刷新即生效。失败如实回 ok:false。
+  routes[`${prefix}/update-apply`] = async (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    try {
+      const latest = await fetchLatestPkgVersion()
+      if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('remote version invalid')
+      if (!semverLt(PKG.version, latest)) { sendJson(res, 200, { ok: false, message: '已是最新版本，无需更新', current: PKG.version, latest }); return }
+      const target = process.env.M10_UPDATE_TARGET || join(HERE, '..')
+      const sha = await resolveRemoteSha()
+      const files = await fetchRemoteFileList(sha)
+      if (!files.length) throw new Error('remote file list empty')
+      let written = 0
+      for (const rel of files) {
+        if (rel.includes('..')) continue
+        const buf = await fetchRemoteFile(sha, rel)
+        if (buf == null) continue
+        const out = join(target, rel)
+        mkdirSync(dirname(out), { recursive: true })
+        writeFileSync(out, buf)
+        written++
+      }
+      updCache = null
+      sendJson(res, 200, { ok: true, current: PKG.version, latest, sha, written, restartRequired: true, target })
+    } catch (e) {
+      sendJson(res, 200, { ok: false, message: '更新失败：' + String((e && e.message) || e) })
     }
   }
 
