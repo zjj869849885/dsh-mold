@@ -7,7 +7,7 @@
 //   POST /filter /data /billinit /detail /save /billstatus /image /popdata /item /itemdo /colset
 // 失败一律如实上抛为 {ok:false,message}（W4），不做防御性兜底。
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import { PersonalSqliteAdapter, mimeOf } from './sqlite/adapter.js'
@@ -21,6 +21,23 @@ import { registerPersonalTools } from './sqlite/personal.tools.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8'))
+// v0.1.7 免重启更新：PKG 是模块加载时快照，自主更新写盘后老模块仍报旧版 —— 版本比对/展示一律实时读盘；
+// runningVersion（仍在跑的代码版本）保留 PKG 常量语义，供热更新完成判定（前端轮询它追平 latest 即成功）。
+function readPkgVersion() {
+  try { return String(JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8')).version || PKG.version) } catch { return String(PKG.version) }
+}
+let hotReloadGetter = null
+async function hotReloadSelf() {
+  if (!hotReloadGetter) return { ok: false, why: 'no-ctx' }
+  let hmr = null
+  try { hmr = hotReloadGetter() } catch (e) { return { ok: false, why: 'get-hmr:' + String((e && e.message) || e) } }
+  if (!hmr || typeof hmr.runExclusive !== 'function' || typeof hmr.reconcileProfile !== 'function') return { ok: false, why: 'no-hmr' }
+  try {
+    const r = await hmr.runExclusive(() => hmr.reconcileProfile([]))
+    const blocking = (r && r.restartReason) || (r && r.pending && r.pending.length)
+    return blocking ? { ok: false, why: 'pending:' + String(blocking) } : { ok: true }
+  } catch (e) { return { ok: false, why: 'err:' + String((e && e.message) || e) } }
+}
 // 自动更新（2026-11-22）：发布仓 raw package.json 为权威最新版；进程级 10 分钟缓存，失败不缓存。
 const UPDATE_REPO_URL = 'https://github.com/zjj869849885/m10-mold-personal.git'
 // 国内网络对 raw.githubusercontent 不通很常见（本机 2026-11-22 实测超时），按候选顺序降级探测并记住通的那条。
@@ -431,10 +448,12 @@ const isMold = (strFunc) => strFunc === '203101'
  * @param adapter PersonalSqliteAdapter 实例
  * @param prefix  路由前缀（默认 /m10-mold-personal/api）
  */
-export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operator = { current: () => LOCAL_USER, ensure: async () => LOCAL_USER }) {
+export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operator = { current: () => LOCAL_USER, ensure: async () => LOCAL_USER }, hooks = {}) {
   const unknownFunc = (strFunc) => ({ ok: false, sessionExpired: false, message: `未知或未接入的页面 strFunc：${JSON.stringify(strFunc)}` })
 
   const routes = {}
+  // v0.1.7 热更新：apply() 经 hooks 传下取宿主 hmr 的闭包；零 Host 探针不传 hooks 则热更自动降级为「重启生效」。
+  if (hooks && typeof hooks.getHotReload === 'function') hotReloadGetter = hooks.getHotReload
 
   routes[`${prefix}/version`] = async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
@@ -450,7 +469,7 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
       lanInstance = { alive: true, url: grant.lanUrl, grantUrl: grant.grantUrl || null, via: 'probe' }
     }
     const body = JSON.stringify({
-      ok: true, name: PKG.name, version: PKG.version, edition: EDITION, schemaVersion: adapter.schemaVersion,
+      ok: true, name: PKG.name, version: readPkgVersion(), runningVersion: String(PKG.version), hotReloadAvailable: !!hotReloadGetter, edition: EDITION, schemaVersion: adapter.schemaVersion,
       lanUrl, hostTz: detectHostTz(),
       lanBindable: bind.lanBindable, bindAddress: bind.bindAddress,
       lanInstance,
@@ -467,11 +486,11 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     try {
       const latest = await fetchLatestPkgVersion()
       if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('remote package.json has no semver version')
-      const hasUpdate = semverLt(PKG.version, latest)
-      updCache = { at: Date.now(), body: { current: PKG.version, latest, hasUpdate, repo: UPDATE_REPO_URL } }
+      const hasUpdate = semverLt(readPkgVersion(), latest)
+      updCache = { at: Date.now(), body: { current: readPkgVersion(), latest, hasUpdate, repo: UPDATE_REPO_URL } }
       sendJson(res, 200, { ok: true, ...updCache.body })
     } catch (e) {
-      sendJson(res, 200, { ok: false, current: PKG.version, message: '无法获取最新版本（网络不通或仓库未发布）：' + String((e && e.message) || e) })
+      sendJson(res, 200, { ok: false, current: readPkgVersion(), message: '无法获取最新版本（网络不通或仓库未发布）：' + String((e && e.message) || e) })
     }
   }
 
@@ -482,12 +501,13 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     try {
       const latest = await fetchLatestPkgVersion()
       if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('remote version invalid')
-      if (!semverLt(PKG.version, latest)) { sendJson(res, 200, { ok: false, message: '已是最新版本，无需更新', current: PKG.version, latest }); return }
+      if (!semverLt(readPkgVersion(), latest)) { sendJson(res, 200, { ok: false, message: '已是最新版本，无需更新', current: readPkgVersion(), latest }); return }
       const target = process.env.M10_UPDATE_TARGET || join(HERE, '..')
       const sha = await resolveRemoteSha()
       const files = await fetchRemoteFileList(sha)
       if (!files.length) throw new Error('remote file list empty')
       let written = 0
+      let serverChanged = false
       for (const rel of files) {
         if (rel.includes('..')) continue
         const buf = await fetchRemoteFile(sha, rel)
@@ -496,9 +516,19 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
         mkdirSync(dirname(out), { recursive: true })
         writeFileSync(out, buf)
         written++
+        if (/^(server|migrations)[\\/]/.test(rel) || rel === 'cordis.patch.yml') serverChanged = true
       }
       updCache = null
-      sendJson(res, 200, { ok: true, current: PKG.version, latest, sha, written, restartRequired: true, target })
+      // 沙箱验证（M10_UPDATE_TARGET≠插件目录）不碰运行中实例；写的是本实例才排期热替换。
+      const isSelf = !process.env.M10_UPDATE_TARGET && resolve(target) === resolve(join(HERE, '..'))
+      const hotScheduled = isSelf && serverChanged && !!hotReloadGetter
+      sendJson(res, 200, {
+        ok: true, current: readPkgVersion(), latest, sha, written, serverChanged,
+        hotScheduled, restartRequired: serverChanged && !hotScheduled, target,
+      })
+      // 时序铁律：热替换会销毁重启本插件 fiber（SQLite 适配器/路由/本次响应同属它），
+      // 必须先把响应刷出再触发，故延迟 800ms 异步执行；结果由前端轮询 /version runningVersion 判定。
+      if (hotScheduled) setTimeout(() => { void hotReloadSelf() }, 800)
     } catch (e) {
       sendJson(res, 200, { ok: false, message: '更新失败：' + String((e && e.message) || e) })
     }
@@ -909,7 +939,16 @@ export function apply(ctx, config = {}) {
   const apiPrefix = `${runtime.routePrefix}/api`
   const adapter = new PersonalSqliteAdapter({ dataDir: runtime.dataDir, seed: { dicts: true, sampleMolds: config.sampleMolds === true } })
   const operator = makeOperator(ctx)
-  const routes = createRoutes(adapter, apiPrefix, operator)
+  let hotScopeReady = false
+  const routes = createRoutes(adapter, apiPrefix, operator, {
+    // 宿主 hmr 服务经 inject 动态获取（ctx.get 取不到未声明依赖，与账号服务 deepseekAccount 同坑）；
+    // 组合未含 hmr / scope 未就绪时返回 undefined，update-apply 如实降级「重启生效」，绝不报错。
+    getHotReload: () => {
+      if (!hotScopeReady) { try { ctx.inject(['hmr'], () => { hotScopeReady = true }) } catch { /* 组合无 hmr：保持降级 */ } }
+      if (!hotScopeReady) return undefined
+      try { return ctx.hmr || (ctx.root && ctx.root.get && ctx.root.get('hmr')) } catch { return undefined }
+    },
+  })
   // 阶段 3 AI 工具（设计稿 §2.2.4 aiTools）：查模/记模次/记保养/预警，零依赖平对象注册（个人版不引 dsh-tools）。
   registerPersonalTools(ctx, adapter)
   // webServer 为可选注入依赖：与企业版同用 ctx.inject(['webServer'], scope => ...) 动态声明，
