@@ -678,6 +678,7 @@ export function buildPageFilterMeta(strFunc, { dictOptions = {}, moldNumbers = [
   if (!def) return { ok: false, strFunc, message: `未知子页 strFunc：${strFunc}` }
   const infoRow = (f, tab = 'H') => {
     const dt = dtypeOf(f)
+    if (f.moldRef) dt.FInputType = '下拉查询选择'
     const row = {
       FField: f.metaKey,
       FFieldName: f.title || f.metaKey,

@@ -18,9 +18,13 @@ $log = Join-Path $profDir 'lan-instance.log'
 $errLog = Join-Path $profDir 'lan-instance.err.log'
 
 function Find-LanIP {
-  (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
-    Select-Object -First 1).IPAddress
+  $all = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notmatch '^198\.(18|19)\.' -and $_.PrefixOrigin -ne 'WellKnown' }
+  $priv = $all | Where-Object { $_.IPAddress -match '^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)' } | Select-Object -First 1
+  if ($priv) { return $priv.IPAddress }
+  $first = $all | Select-Object -First 1
+  if ($first) { return $first.IPAddress }
+  return ''
 }
 function Test-HostRoot($c) {
   $c -and (Test-Path (Join-Path $c 'apps\cli\src\bin.ts')) -and (Test-Path (Join-Path $c 'node_modules'))
@@ -118,8 +122,16 @@ function Ensure-Firewall($nodeExe) {
 
 switch ($Action) {
   'start' {
+    if (-not $IP) { $IP = Find-LanIP }
     $cur = Get-Listener
-    if ($cur) { Write-Output "ALREADY-RUNNING PID=$($cur.Pid) ($($cur.Addr))"; break }
+    if ($cur) {
+      $curIp = ($cur.Addr.Split(':'))[0]
+      if ($curIp -eq $IP) { Write-Output "ALREADY-RUNNING PID=$($cur.Pid) ($($cur.Addr))"; break }
+      Write-Output "STALE-IP: 实例 PID=$($cur.Pid) 仍绑 $curIp，当前局域网 IP 为 $IP（疑似切换网络），正在重启实例…"
+      if ($cur.Name -ne 'node') { Write-Output "REFUSED: PID $($cur.Pid) 是 $($cur.Name) 而非 node，无法自动重启，请手动处理"; break }
+      Stop-Process -Id $cur.Pid -Force
+      Start-Sleep -Seconds 2
+    }
     $root = Find-HostRoot
     if (-not $root) { Write-Output 'FAIL: 未找到 DeepSeek Harness 宿主目录（需含 apps\cli\src\bin.ts 与 node_modules）。用 -HostRoot <路径> 指定；没有宿主目录时请从主机电脑整体复制（见发布仓 README「多端/当主机」）。'; break }
     $node = Find-Node
