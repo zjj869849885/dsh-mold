@@ -47,9 +47,11 @@ const UPDATE_RAW_URLS = [
   'https://raw.githubusercontent.com/zjj869849885/m10-mold-personal/master/package.json',
 ]
 let updateGoodUrl = null
+const API_GITHUB_PKG_URL = UPDATE_RAW_URLS[0]
 /** 逐个抓发布仓 package.json 取 version；成功记住该 URL，全败抛出最后错误（路由如实 ok:false，绝不假报）。 */
 async function fetchLatestPkgVersion() {
-  const order = updateGoodUrl ? [updateGoodUrl, ...UPDATE_RAW_URLS.filter((u) => u !== updateGoodUrl)] : UPDATE_RAW_URLS.slice()
+  const rest = UPDATE_RAW_URLS.filter((u) => u !== API_GITHUB_PKG_URL)
+  const order = (updateGoodUrl && updateGoodUrl !== API_GITHUB_PKG_URL) ? [API_GITHUB_PKG_URL, updateGoodUrl, ...rest.filter((u) => u !== updateGoodUrl)] : UPDATE_RAW_URLS.slice()
   let lastErr = null
   for (const u of order) {
     try {
@@ -482,7 +484,8 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
   // 网络不通/未发布如实回 ok:false，绝不假报「已是最新」。
   routes[`${prefix}/update-check`] = async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
-    if (updCache && Date.now() - updCache.at < UPDATE_TTL_MS) { sendJson(res, 200, { ok: true, cached: true, ...updCache.body }); return }
+    const force = String(req.url || '').includes('force=1')
+    if (!force && updCache && Date.now() - updCache.at < UPDATE_TTL_MS) { sendJson(res, 200, { ok: true, cached: true, ...updCache.body }); return }
     try {
       const latest = await fetchLatestPkgVersion()
       if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('remote package.json has no semver version')
