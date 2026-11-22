@@ -21,6 +21,51 @@ import { registerPersonalTools } from './sqlite/personal.tools.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8'))
+// 自动更新（2026-11-22）：发布仓 raw package.json 为权威最新版；进程级 10 分钟缓存，失败不缓存。
+const UPDATE_REPO_URL = 'https://github.com/zjj869849885/m10-mold-personal.git'
+// 国内网络对 raw.githubusercontent 不通很常见（本机 2026-11-22 实测超时），按候选顺序降级探测并记住通的那条。
+const UPDATE_RAW_URLS = [
+  'https://raw.githubusercontent.com/zjj869849885/m10-mold-personal/master/package.json',
+  'https://cdn.jsdelivr.net/gh/zjj869849885/m10-mold-personal@master/package.json',
+  'https://api.github.com/repos/zjj869849885/m10-mold-personal/contents/package.json',
+]
+let updateGoodUrl = null
+/** 逐个抓发布仓 package.json 取 version；成功记住该 URL，全败抛出最后错误（路由如实 ok:false，绝不假报）。 */
+async function fetchLatestPkgVersion() {
+  const order = updateGoodUrl ? [updateGoodUrl, ...UPDATE_RAW_URLS.filter((u) => u !== updateGoodUrl)] : UPDATE_RAW_URLS.slice()
+  let lastErr = null
+  for (const u of order) {
+    try {
+      const r = await fetch(u, { signal: AbortSignal.timeout(6000), headers: { 'cache-control': 'no-cache' } })
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' @ ' + new URL(u).host)
+      let remote
+      if (u.startsWith('https://api.github.com')) {
+        // contents API 回 base64（每 76 字符带换行），去空白后解码
+        const meta = await r.json()
+        const b64 = String(meta.content || '').replace(/\s+/g, '')
+        remote = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))))
+      } else {
+        remote = await r.json()
+      }
+      updateGoodUrl = u
+      return remote && typeof remote.version === 'string' ? remote.version : ''
+    } catch (e) { lastErr = e }
+  }
+  throw lastErr || new Error('all update urls failed')
+}
+const UPDATE_TTL_MS = 10 * 60 * 1000
+let updCache = null
+/** 三段式 semver 比较 a<b（缺段按 0）；仅数值段有效，预发布后缀忽略——发布仓约定纯 x.y.z。 */
+function semverLt(a, b) {
+  const pa = String(a || '').split('.')
+  const pb = String(b || '').split('.')
+  for (let i = 0; i < 3; i++) {
+    const x = parseInt(pa[i], 10) || 0
+    const y = parseInt(pb[i], 10) || 0
+    if (x !== y) return x < y
+  }
+  return false
+}
 // 本机登录账户名（方案A）：/pages user.name 与新单据 FCreater 的真实来源。
 // os.userInfo() 属 Node 内置零依赖；异常/空值如实回落占位「本机用户」，不伪造用户名。
 const LOCAL_USER = (() => {
@@ -233,6 +278,44 @@ function detectLanBindable(req) {
 }
 
 /**
+ * 局域网实例授权文件（多端自动地址 2026-11-22）：boot token 只存在于宿主进程内存（browser-auth WeakMap），
+ * 插件拿不到；官方启动入口（bootPersonal3081.ps1 / personalLan.ps1 start）启动成功后把
+ * {ip,port,lanUrl,token,pid} 落盘。局域网侧 /version 见 pid 与当前进程一致即自证，拼含 token 的免登录
+ * grantUrl，设置页自动生成可扫二维码（不带 token 的码手机首开必被宿主 401 拦——「扫开打不开」的真因）；
+ * 回环侧（桌面 App）读文件并实探局域网实例可达性，桌面设置页同样自动显示地址与二维码。
+ * DSH_PERSONAL_LAN_FILE 可覆盖路径；文件缺失/畸形一律如实回 null，绝不猜测。
+ */
+function lanGrantFilePath() {
+  try {
+    if (process.env.DSH_PERSONAL_LAN_FILE) return process.env.DSH_PERSONAL_LAN_FILE
+    return join(os.homedir(), '.dsh', 'profiles', 'personal', 'lan-instance.json')
+  } catch { return '' }
+}
+function readLanGrantFile() {
+  const p = lanGrantFilePath()
+  if (!p) return null
+  try {
+    const j = JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, ''))
+    if (!j || typeof j.lanUrl !== 'string' || !/^https?:\/\/.+/.test(j.lanUrl)) return null
+    const token = typeof j.token === 'string' ? j.token : ''
+    return {
+      lanUrl: j.lanUrl,
+      grantUrl: token ? j.lanUrl.replace(/\/+$/, '') + '/?token=' + token : '',
+      pid: Number(j.pid) || 0,
+    }
+  } catch { return null }
+}
+/** 实探局域网实例：GET <baseUrl>/…/version 期望 lanBindable=true；1.5s 超时如实回 false。 */
+async function probeLanAlive(baseUrl, apiPrefix) {
+  try {
+    const res = await fetch(baseUrl.replace(/\/+$/, '') + apiPrefix + '/version', { signal: AbortSignal.timeout(1500) })
+    if (!res.ok) return false
+    const j = await res.json()
+    return !!(j && j.ok === true && j.lanBindable === true)
+  } catch { return false }
+}
+
+/**
  * 主机 IANA 时区（阶段 5 多时区显示层锚点）：库内 datetime 是主机本地墙钟（jsonNorm 用 UTC 取值器输出无偏移 yyyy-MM-dd HH:mm:ss），
  * 前端需知道这堵墙钟属于哪个时区才能正确换算到浏览设备时区。取运行本插件的 Node 进程 OS 时区，纯新增、异常回空串。
  */
@@ -309,16 +392,43 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
 
   const routes = {}
 
-  routes[`${prefix}/version`] = (req, res) => {
+  routes[`${prefix}/version`] = async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
     const bind = detectLanBindable(req)
+    const lanUrl = detectLanBase(req)
+    // 局域网实例自动探测（多端 2026-11-22）：局域网侧自证并带 grantUrl（启动脚本落盘的授权文件 pid 吻合才可信）；
+    // 回环侧（桌面 App）实探授权文件指向的实例，探通才报 alive——绝不凭文件存在就给出打不开的地址。
+    let lanInstance = null
+    const grant = readLanGrantFile()
+    if (bind.lanBindable) {
+      lanInstance = { alive: true, url: lanUrl, grantUrl: grant && grant.pid === process.pid ? grant.grantUrl || null : null, via: 'self' }
+    } else if (grant && await probeLanAlive(grant.lanUrl, prefix)) {
+      lanInstance = { alive: true, url: grant.lanUrl, grantUrl: grant.grantUrl || null, via: 'probe' }
+    }
     const body = JSON.stringify({
       ok: true, name: PKG.name, version: PKG.version, edition: EDITION, schemaVersion: adapter.schemaVersion,
-      lanUrl: detectLanBase(req), hostTz: detectHostTz(),
+      lanUrl, hostTz: detectHostTz(),
       lanBindable: bind.lanBindable, bindAddress: bind.bindAddress,
+      lanInstance,
     })
     res.writeHead(200, JSON_HEADERS_OK)
     res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  // /update-check：自动更新版本比对（GitHub 发布仓 package.json，进程级 10 分钟缓存）。
+  // 网络不通/未发布如实回 ok:false，绝不假报「已是最新」。
+  routes[`${prefix}/update-check`] = async (req, res) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
+    if (updCache && Date.now() - updCache.at < UPDATE_TTL_MS) { sendJson(res, 200, { ok: true, cached: true, ...updCache.body }); return }
+    try {
+      const latest = await fetchLatestPkgVersion()
+      if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('remote package.json has no semver version')
+      const hasUpdate = semverLt(PKG.version, latest)
+      updCache = { at: Date.now(), body: { current: PKG.version, latest, hasUpdate, repo: UPDATE_REPO_URL } }
+      sendJson(res, 200, { ok: true, ...updCache.body })
+    } catch (e) {
+      sendJson(res, 200, { ok: false, current: PKG.version, message: '无法获取最新版本（网络不通或仓库未发布）：' + String((e && e.message) || e) })
+    }
   }
 
   routes[`${prefix}/pages`] = async (req, res) => {
