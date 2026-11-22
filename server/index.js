@@ -1,0 +1,728 @@
+// server/index.js —— 个人版插件入口 + 薄路由层（设计稿 §2.2.2 / 阶段 2 p2a）
+// Host 契约与企业版逐字同构：export name / inject=['tools'] / apply(ctx, config)，
+// 路由经 scope.webServer.register({kind:'exact',path,handler}) 挂载。
+// createRoutes(adapter, prefix) 独立导出：冒烟探针可直接挂 node:http 全链路验证，零 Host 依赖。
+// 端点最小集（个人版能力闭环，出参与企业版 localApi 逐键同形）：
+//   GET  /version /pages /org
+//   POST /filter /data /billinit /detail /save /billstatus /image /popdata /item /itemdo /colset
+// 失败一律如实上抛为 {ok:false,message}（W4），不做防御性兜底。
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import os from 'node:os'
+import { PersonalSqliteAdapter, mimeOf } from './sqlite/adapter.js'
+import { resolveDataDir } from './sqlite/db.js'
+import { buildBillInit, buildDataHead, NUMERIC_METAKEYS } from './sqlite/personal.schema.js'
+import { isPageStrFunc, buildPageFilterMeta, buildPageBillInit, buildPageDataHead, numericMetaKeys as pageNumericMetaKeys, auditableColOf } from './sqlite/personal.pages.js'
+import { isItemStrFunc } from './sqlite/personal.item.js'
+import { isReportStrFunc, buildReport, buildReportDetail } from './sqlite/personal.report.js'
+import { buildPushNextRow } from './sqlite/personal.push.js'
+import { registerPersonalTools } from './sqlite/personal.tools.js'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const PKG = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8'))
+// 本机登录账户名（方案A）：/pages user.name 与新单据 FCreater 的真实来源。
+// os.userInfo() 属 Node 内置零依赖；异常/空值如实回落占位「本机用户」，不伪造用户名。
+const LOCAL_USER = (() => {
+  try {
+    const u = os.userInfo().username
+    return u ? u.charAt(0).toUpperCase() + u.slice(1) : '本机用户'
+  } catch {
+    return '本机用户'
+  }
+})()
+// 操作员名解析（harness 登录账号优先）：经 ctx.inject(['deepseekAccount']) 取宿主账号服务，
+// getProfile 拿 profile.name（本机已登录的 DeepSeek 账号，即宿主左下角所示身份），命中后进程内粘性缓存
+// （/pages 不反复打网络、制单人 FCreater 稳定）；服务缺失/未登录/离线/异常如实回落 LOCAL_USER。
+// 注：ctx.get 仅能取到已声明依赖，deepseekAccount 非本包静态 inject，必须走 ctx.inject 动态获取。
+function makeOperator(ctx) {
+  let opName = null, inflight = false, lastTry = 0, acct = null
+  async function refresh(force) {
+    if (!acct || inflight || typeof acct.getProfile !== 'function') return
+    const now = Date.now()
+    if (!force && now - lastTry < 15000) return
+    lastTry = now
+    inflight = true
+    try {
+      const p = await acct.getProfile({ version: String(PKG.version || '0.0.0'), locale: 'zh-CN', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 })
+      if (p && p.status === 'ready' && p.value && p.value.name) opName = String(p.value.name)
+    } catch { /* 离线/未登录：保持回落，下次再试 */ }
+    finally { inflight = false }
+  }
+  // deepseekAccount 就绪后预热一次；真实 cordis 下服务缺失只是不触发回调，恒回落 LOCAL_USER。
+  // 探针/无 Host 的 mock ctx 其 inject 会对不在 scope 的依赖同步抛错，故 try 兜住以保持零 Host 依赖可跑。
+  try { if (ctx && typeof ctx.inject === 'function') ctx.inject(['deepseekAccount'], (scope) => { acct = scope.deepseekAccount; void refresh(true) }) } catch { /* mock/无该服务：保持回落 LOCAL_USER */ }
+  return {
+    current() { return opName || LOCAL_USER },
+    // 首屏兜底：opName 未就绪时最多等 timeoutMs，确保 /pages 首次即返回登录账号名。
+    async ensure(timeoutMs = 2000) {
+      if (opName) return opName
+      const start = Date.now()
+      while (!opName && Date.now() - start < timeoutMs) {
+        await refresh(true)
+        if (opName) break
+        await new Promise((r) => setTimeout(r, 150))
+      }
+      return opName || LOCAL_USER
+    },
+  }
+}
+export const name = PKG.name
+export const inject = ['tools']
+
+/**
+ * 个人版静态页清单（与企业版 pages.js 同形状：groups[].pages[]{name,strFunc,form}）。
+ * 分组对齐企业侧栏语义（模具管理/维修管理/点检·保养），不再把 4 页全塞在「模具管理」下。
+ * 企业版分组：模具管理(6)、点检管理(4)、保养管理(4)、维修管理(5)、业务处理(12)、报表分析(15)。
+ * 个人版分组：模具管理(6：4 dp + 2 item)、维修管理(1)、点检·保养(1)。
+ * 模具管理组同时容纳 dp 主页（档案/部件/备件/组）与 item 基础资料（模具类型/部件分类），与 ListView 数据驱动契约零冲突。
+ */
+const PAGE_GROUPS = [
+  {
+    key: 'pg090',
+    name: '基础资料',
+    pages: [
+      { name: '模具类型', fNumber: '210150090001', strFunc: 'MDType', form: 'item' },
+      { name: '模具部件分类', fNumber: '210150090002', strFunc: 'MDPartClass', form: 'item' },
+      { name: '库位', fNumber: '210150090003', strFunc: 'MDLocation', form: 'item' },
+      { name: '模具组', fNumber: '210150090004', strFunc: 'MDMoldGroup', form: 'item' },
+      { name: '供应商', fNumber: '210150090005', strFunc: 'MDSupplier', form: 'item' },
+      { name: '客户', fNumber: '210150090006', strFunc: 'MDCustomer', form: 'item' },
+      { name: '车间/部门', fNumber: '210150090007', strFunc: 'MDDept', form: 'item' },
+      { name: '生产中心', fNumber: '210150090008', strFunc: 'MDProdLine', form: 'item' },
+      { name: '仓库', fNumber: '210150090009', strFunc: 'MDStock', form: 'item' },
+      { name: '人员', fNumber: '210150090010', strFunc: 'MDEmployee', form: 'item' },
+      { name: '计量单位', fNumber: '210150090011', strFunc: 'MDUnit', form: 'item' },
+      { name: '币别', fNumber: '210150090012', strFunc: 'MDCurrency', form: 'item' },
+      { name: '岗位/角色', fNumber: '210150090013', strFunc: 'MDPosition', form: 'item' },
+      { name: '点检项目类型', fNumber: '210150090014', strFunc: 'MDChkItemType', form: 'item' },
+      { name: '保养项目类型', fNumber: '210150090015', strFunc: 'MDMainItemType', form: 'item' },
+      { name: '组织', fNumber: '210150090016', strFunc: 'MDOrg', form: 'item' },
+    ],
+  },
+  {
+    key: 'pg100',
+    name: '模具管理',
+    pages: [
+      { name: '模具档案', fNumber: '203101', strFunc: '203101', form: 'dp', p0: true },
+      { name: '部件档案', fNumber: '203102', strFunc: '203102', form: 'dp', p0: true },
+      { name: '备件档案', fNumber: '203103', strFunc: '203103', form: 'dp', p0: true },
+    ],
+  },
+  {
+    key: 'pg120',
+    name: '点检管理基础资料',
+    pages: [
+      { name: '点检项目', fNumber: '210150120002', strFunc: '203110', form: 'dp' },
+      { name: '点检方案', fNumber: '210150120003', strFunc: '203111', form: 'dp' },
+    ],
+  },
+  {
+    key: 'pg115',
+    name: '点检管理',
+    pages: [
+      { name: '点检任务单', fNumber: '203114', strFunc: '203114', form: 'dp' },
+      { name: '点检记录', fNumber: '203116', strFunc: '203116', form: 'dp' },
+    ],
+  },
+  {
+    key: 'pg140',
+    name: '保养管理基础资料',
+    pages: [
+      { name: '保养项目', fNumber: '210150140002', strFunc: '203120', form: 'dp' },
+      { name: '保养方案', fNumber: '210150140003', strFunc: '203121', form: 'dp' },
+    ],
+  },
+  {
+    key: 'pg135',
+    name: '保养管理',
+    pages: [
+      { name: '保养任务单', fNumber: '203124', strFunc: '203124', form: 'dp' },
+      { name: '保养记录', fNumber: '203126', strFunc: '203126', form: 'dp' },
+    ],
+  },
+  {
+    key: 'pg130',
+    name: '维修管理',
+    pages: [
+      { name: '报修单', fNumber: '203130', strFunc: '203130', form: 'dp' },
+      { name: '维修任务单', fNumber: '203131', strFunc: '203131', form: 'dp' },
+      { name: '维修记录', fNumber: '203133', strFunc: '203133', form: 'dp' },
+    ],
+  },
+  {
+    key: 'pg150',
+    name: '业务处理',
+    pages: [
+      { name: '生产申领单', fNumber: '203140', strFunc: '203140', form: 'dp' },
+      { name: '出库申请单', fNumber: '203141', strFunc: '203141', form: 'dp' },
+      { name: '领用记录单', fNumber: '203142', strFunc: '203142', form: 'dp' },
+      { name: '归还记录单', fNumber: '203143', strFunc: '203143', form: 'dp' },
+      { name: '报废单', fNumber: '203146', strFunc: '203146', form: 'dp' },
+      { name: '使用汇报单', fNumber: '203149', strFunc: '203149', form: 'dp' },
+      { name: '盘点记录单', fNumber: '203151', strFunc: '203151', form: 'dp' },
+      { name: '状态变更单', fNumber: '203153', strFunc: '203153', form: 'dp' },
+    ],
+  },
+  {
+    key: 'pg160',
+    name: '报表分析',
+    pages: [
+      { name: '点检报表', fNumber: 'C001', strFunc: 'C001', form: 'report' },
+      { name: '保养报表', fNumber: 'C002', strFunc: 'C002', form: 'report' },
+      { name: '报修报表', fNumber: 'C003', strFunc: 'C003', form: 'report' },
+      { name: '维修报表', fNumber: 'C004', strFunc: 'C004', form: 'report' },
+      { name: '领用报表', fNumber: 'C005', strFunc: 'C005', form: 'report' },
+      { name: '归还报表', fNumber: 'C006', strFunc: 'C006', form: 'report' },
+      { name: '寿命报表', fNumber: 'C007', strFunc: 'C007', form: 'report' },
+      { name: '日常业务处理记录', fNumber: 'C009', strFunc: 'C009', form: 'report' },
+      { name: '故障次数统计', fNumber: 'C010', strFunc: 'C010', form: 'reportmulti' },
+      { name: '保养执行报表', fNumber: 'C011', strFunc: 'C011', form: 'report' },
+      { name: '人员任务统计', fNumber: 'C012', strFunc: 'C012', form: 'reportmulti' },
+      { name: '报废预测', fNumber: 'C013', strFunc: 'C013', form: 'report' },
+      { name: '使用情况统计', fNumber: 'C014', strFunc: 'C014', form: 'report' },
+      { name: '模具履历', fNumber: 'C015', strFunc: 'C015', form: 'reportmulti' },
+    ],
+  },
+]
+const MODULE_DEF = { mid: 'S20', fNumber: '210150', parentNumber: '210', name: '模具管理' }
+const COUNTS = { dp: 22, item: 16, total: 52 }
+const EDITION = 'personal'
+
+const JSON_HEADERS_OK = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+
+/**
+ * b8 二维码标签「扫码直达」基址（设计稿 §6 坑 1：绝不把 localhost/127.0.0.1/0.0.0.0 编进二维码）。
+ * 优先取请求 Host（本机经局域网 IP 打开时即该 IP:port），命中回环/通配地址则回退探测首个非内部 IPv4。
+ */
+function detectLanBase(req) {
+  const hostHdr = String((req.headers && req.headers.host) || '')
+  const sep = hostHdr.lastIndexOf(':')
+  const h = sep > 0 ? hostHdr.slice(0, sep) : hostHdr
+  const port = sep > 0 ? hostHdr.slice(sep) : ''
+  const isLoopback = !h || h === 'localhost' || h.startsWith('127.') || h === '0.0.0.0' || h === '[::1]' || h === '::1'
+  if (!isLoopback) return 'http://' + hostHdr
+  const ifaces = os.networkInterfaces()
+  for (const k of Object.keys(ifaces)) {
+    for (const a of ifaces[k] || []) {
+      if ((a.family === 'IPv4' || a.family === 4) && !a.internal) return 'http://' + a.address + port
+    }
+  }
+  return 'http://' + (hostHdr || '127.0.0.1')
+}
+
+/**
+ * 主机 IANA 时区（阶段 5 多时区显示层锚点）：库内 datetime 是主机本地墙钟（jsonNorm 用 UTC 取值器输出无偏移 yyyy-MM-dd HH:mm:ss），
+ * 前端需知道这堵墙钟属于哪个时区才能正确换算到浏览设备时区。取运行本插件的 Node 进程 OS 时区，纯新增、异常回空串。
+ */
+function detectHostTz() {
+  try { return String(Intl.DateTimeFormat().resolvedOptions().timeZone || '') } catch { return '' }
+}
+
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj)
+  res.writeHead(status, JSON_HEADERS_OK)
+  res.end(body)
+}
+
+/** 与企业版同口径的 JSON body 读取（上限 + 解析失败回 400 并返回 null）。 */
+function readJsonBody(req, res, maxSize, cb) {
+  let size = 0
+  let aborted = false
+  const chunks = []
+  req.on('data', (c) => {
+    if (aborted) return
+    size += c.length
+    if (size > maxSize) {
+      aborted = true
+      res.writeHead(413, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', connection: 'close' })
+      res.end(JSON.stringify({ ok: false, message: '请求体过大' }))
+      // 优雅 FIN（socket.end）而非 RST（req.destroy）：大体积上传途中立即 destroy 会抢先发 RST，
+      // 把已写入的 413 响应字节连同客户端接收缓冲一起丢弃（客户端只剩“网络中断”，违 W4 如实上抛）。
+      // 413 经全双工在上传途中即可抵达，故等冲刷完成（finish）后优雅半关。
+      res.on('finish', () => { try { req.socket.end() } catch { /* 已关闭忽略 */ } })
+      return
+    }
+    chunks.push(c)
+  })
+  req.on('end', () => {
+    if (aborted || res.writableEnded) return
+    let parsed = null
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    } catch {
+      sendJson(res, 400, { ok: false, message: '请求体不是合法 JSON' })
+      return
+    }
+    // cb 在事件回调里执行，apply 注册层的同步 try/catch 罩不到：
+    // 此处不兼平则路由内任何异步抛错（如非法图片 saveImage Throw）直接 uncaughtException 打崩 Host 进程。
+    // 包上闸：如实上抛为 {ok:false,message}（W4），绝不静默吞。
+    try {
+      cb(parsed == null || typeof parsed !== 'object' ? {} : parsed)
+    } catch (e) {
+      if (!res.writableEnded) sendJson(res, 200, { ok: false, message: String((e && e.message) || e) })
+    }
+  })
+  req.on('error', () => {
+    if (!res.writableEnded) sendJson(res, 400, { ok: false, message: '请求读取失败' })
+  })
+}
+
+/** 个人版受理删除/审核/反审核（TargetStatus '2'/'5'/'1'）；关闭/作废等其余状态动作能力裁剪，如实回错。 */
+function unsupportedStatus(targetStatus) {
+  const labels = { 6: '关闭', 3: '作废', 4: '提交' }
+  return `个人版不支持该状态操作（${labels[String(targetStatus)] || String(targetStatus)}）`
+}
+
+/** strFunc 白名单：模具档案 203101（personal.schema.js 既有绿色路径）+ 补齐子页（personal.pages.js 通用引擎）。 */
+const knownPage = (strFunc) => strFunc === '203101' || isPageStrFunc(strFunc)
+const isMold = (strFunc) => strFunc === '203101'
+
+/**
+ * 生成 path → handler 的纯映射（探针/Host 共用）。handler(req,res) 自带方法网关与错误上抛。
+ * @param adapter PersonalSqliteAdapter 实例
+ * @param prefix  路由前缀（默认 /m10-mold-personal/api）
+ */
+export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operator = { current: () => LOCAL_USER, ensure: async () => LOCAL_USER }) {
+  const unknownFunc = (strFunc) => ({ ok: false, sessionExpired: false, message: `未知或未接入的页面 strFunc：${JSON.stringify(strFunc)}` })
+
+  const routes = {}
+
+  routes[`${prefix}/version`] = (req, res) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
+    const body = JSON.stringify({ ok: true, name: PKG.name, version: PKG.version, edition: EDITION, schemaVersion: adapter.schemaVersion, lanUrl: detectLanBase(req), hostTz: detectHostTz() })
+    res.writeHead(200, JSON_HEADERS_OK)
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  routes[`${prefix}/pages`] = async (req, res) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
+    const body = JSON.stringify({
+      ok: true, source: 'module', modules: [MODULE_DEF], module: MODULE_DEF,
+      counts: COUNTS, groups: PAGE_GROUPS, edition: EDITION, user: { name: await operator.ensure() },
+      // 多组织（请求E）：展开形 {id,name,orgs}（MoldShell L197 消费同企业版；orgs 空时前端选择器自然不渲染）
+      org: adapter.orgPayload(),
+    })
+    res.writeHead(200, JSON_HEADERS_OK)
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  // 多组织（请求E）：GET 回当前组织+字典；POST {id} 切换（app_setting 持久）。出参与企业版 localApi /org 逐键同形。
+  routes[`${prefix}/org`] = (req, res) => {
+    if (req.method === 'GET') {
+      const orgs = adapter.orgRows()
+      if (!orgs.length) { sendJson(res, 200, { ok: false, message: '组织字典不可用：请先在「基础资料 - 组织」维护组织' }); return }
+      sendJson(res, 200, { ok: true, current: adapter.curOrg(), orgs }); return
+    }
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'GET, POST' }); res.end(); return }
+    readJsonBody(req, res, 4096, (source) => {
+      const sw = adapter.setCurOrg(source.id)
+      if (!sw.ok) { sendJson(res, 200, { ok: false, message: sw.message }); return }
+      sendJson(res, 200, { ok: true, current: adapter.curOrg(), orgs: adapter.orgRows() })
+    })
+  }
+
+  routes[`${prefix}/filter`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const fmeta = isMold(strFunc) ? adapter.viewMeta(strFunc) : buildPageFilterMeta(strFunc, { dictOptions: adapter.dictOptions(), moldNumbers: adapter.moldNumbers(), ...adapter.pageDropdownCtx(), curOrgName: adapter.curOrgName() })
+      // 可审核信号（UX 优化 2026-11-22）：档案类/基础资料页（无 billNoPrefix 且非模具）不可审核，顶层透出 auditable，列表页据此隐藏「审核」按钮，杜绝点击撞后端拒绝。
+      sendJson(res, 200, { ...fmeta, auditable: auditableColOf(strFunc) !== '' })
+    })
+  }
+
+  routes[`${prefix}/data`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 262144, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const currentPage = Number.isFinite(source.currentPage) && source.currentPage >= 1 ? Math.floor(source.currentPage) : 1
+      const pageSize = Number.isFinite(source.pageSize) && source.pageSize >= 1 ? Math.floor(source.pageSize) : 50
+      const opts = {
+        page: currentPage,
+        pageSize,
+        FilterList: Array.isArray(source.FilterList) ? source.FilterList : [],
+        filterForm: source.filterForm && typeof source.filterForm === 'object' ? source.filterForm : {},
+      }
+      // 模具走既有 listMolds/buildDataHead 绿色路径；补齐子页走通用 listPage/buildPageDataHead（同形契约）。
+      if (isMold(strFunc)) {
+        const { head: data, totalCount } = adapter.listMolds(opts)
+        sendJson(res, 200, { ok: true, head: buildDataHead(), data, totalCount, desc: '', message: '' })
+      } else {
+        const { head: data, totalCount } = adapter.listPage(strFunc, opts)
+        sendJson(res, 200, { ok: true, head: buildPageDataHead(strFunc), data, totalCount, desc: '', message: '' })
+      }
+    })
+  }
+
+  routes[`${prefix}/billinit`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const value = isMold(strFunc) ? buildBillInit(strFunc, adapter.dictOptions(), adapter.itemOptionsMap(), adapter.curOrgName()) : buildPageBillInit(strFunc, { dictOptions: adapter.dictOptions(), moldNumbers: adapter.moldNumbers(), ...adapter.pageDropdownCtx(), curOrgName: adapter.curOrgName() })
+      // 可审核信号（UX 优化 2026-11-22）：随 value 顶层透出 auditable，BillForm 经 view.meta.auditable 读取以隐藏不可审核页「审核」按钮。
+      sendJson(res, 200, { ok: true, strFunc, value: { ...value, auditable: auditableColOf(strFunc) !== '' }, desc: '', message: '' })
+    })
+  }
+
+  routes[`${prefix}/detail`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const cur = source.CurrentRow && typeof source.CurrentRow === 'object' ? source.CurrentRow : {}
+      const fid = String(cur['单据内码'] ?? cur.FInterID ?? '')
+      const row = fid === '' ? null : (isMold(strFunc) ? adapter.getMold(fid) : adapter.getPage(strFunc, fid))
+      if (!row) { sendJson(res, 200, { ok: false, strFunc, desc: '', message: '单据不存在或已被删除' }); return }
+      // head[0] = 契约行（metaKey 中文键，前端按 Info.FField 对齐回填）+ 系统键（FInterID/状态「其他」块消费）。
+      // displayMap 空：下拉选项已由 /billinit Info._options 直供；FileList 空：个人版附件能力未接入（如实空值）。
+      // 表体页（第五批）：各页签行数组按顶层 tab 键出参（value.B1=[…]，前端 BillForm raw[tab] 消费，与企业 getDetail 同形）。
+      const head0 = { FInterID: Number(fid), FStatus: '0', FCloseStatus: '0', FBillNo: String(row['单据编号'] ?? row['模具编号'] ?? row['部件编号'] ?? row['报修单号'] ?? row['记录单号'] ?? ''), FCreater: operator.current(), FCreateDate: row['创建时间'] ?? '', ...row }
+      const bodies = isMold(strFunc) ? {} : adapter.getPageBodies(strFunc, fid)
+      sendJson(res, 200, { ok: true, strFunc, value: { head: [head0], ...bodies, displayMap: [], FileList: [] }, desc: '', message: '' })
+    })
+  }
+
+  routes[`${prefix}/save`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    // 图片 base64 走 FImage 键（前端 Image 控件剥前缀后下发），上限与企业版对齐放宽到 8MB
+    readJsonBody(req, res, 8388608, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const data = source.Data && typeof source.Data === 'object' ? source.Data : {}
+      const headRows = Array.isArray(data.head) ? data.head : []
+      // 契约行重组：head 行 {FField, FValue[, FImage, FThumbImage]} → metaKey 键；FInterID → 单据内码（add 为 0/空）
+      const contract = {}
+      let imageB64 = ''
+      // 阶段 4：前端 Canvas 同批生成的 320px 缩略图（FThumbImage 伴随字段，§6 坑 2），服务端不切图只落盘。
+      let imageThumbB64 = ''
+      // 重开回显删除（前端 imgEcho 态删除后保存）：image 列恒空无法表达「删图」，靠 FDeleteImage 显式标记。
+      let imageDelete = false
+      // 数值性判定权威源：模具用 NUMERIC_METAKEYS，补齐子页用逐页 pageNumericMetaKeys（同族加固，不信客户端 FDataType）。
+      const numericSet = isMold(strFunc) ? NUMERIC_METAKEYS : pageNumericMetaKeys(strFunc)
+      for (const it of headRows) {
+        if (!it || it.FField == null) continue
+        const k = String(it.FField)
+        const v = it.FValue == null ? '' : String(it.FValue)
+        // 数字字段空串不进契约：缺省=未提供（新增走 schema DEFAULT，更新保持现值），
+        // 防表单 '' 污染 SQLite INTEGER 列、更防 used_shots 等事务累加列被编辑保存意外清零
+        //（企业侧 MSSQL 对 ''→0 强转，个人侧以「缺省不写」为同位口径，adapter 注释本意钉死）。
+        // 数值性判定以【服务端权威 schema（NUMERIC_METAKEYS）】为准，不信客户端自报 FDataType：
+        // 旧客户端/异常载荷缺省或错标 FDataType 时，'' 仍不会污染 INTEGER 列（暗雷 1 同族加固）。
+        if (v === '' && numericSet.has(k)) continue
+        contract[k] = v
+        if (String(it.FDataType || '') === 'Image' && it.FImage) {
+          imageB64 = String(it.FImage)
+          if (it.FThumbImage) imageThumbB64 = String(it.FThumbImage)
+        }
+        if (String(it.FDataType || '') === 'Image' && it.FDeleteImage) imageDelete = true
+      }
+      const finterid = Number(data.FInterID ?? contract['单据内码'] ?? 0) || 0
+      contract['单据内码'] = finterid || ''
+      // 表体下发提取（第五批，企业 saveDPBill Data.bodyArr+Data.body 同源）：只取数组化页签；
+      // 无 bodyArr/未下发 → null（savePage 不动任何表体，保头页行为不变）。
+      let bodiesMap = null
+      if (Array.isArray(data.bodyArr) && data.body && typeof data.body === 'object') {
+        bodiesMap = {}
+        for (const tab of data.bodyArr) { const t = String(tab); if (Array.isArray(data.body[t])) bodiesMap[t] = data.body[t] }
+        if (Object.keys(bodiesMap).length === 0) bodiesMap = null
+      }
+      // 图片魔数前置校验：非法图整体失败且不落「单已存、图失败」的半库主档（扫雷暗雷：图验证必须早于落库）
+      if (imageB64 !== '' && !mimeOf(Buffer.from(imageB64, 'base64'))) {
+        sendJson(res, 200, { ok: false, strFunc, desc: '', message: '无法识别的图片格式（PNG/JPEG/GIF/BMP/WEBP 之外不支持）' })
+        return
+      }
+      let saved
+      try {
+        saved = isMold(strFunc) ? adapter.saveMold(contract) : adapter.savePage(strFunc, contract, bodiesMap)
+      } catch (e) {
+        sendJson(res, 200, { ok: false, strFunc, desc: '', message: String((e && e.message) || e) })
+        return
+      }
+      // 模具档案单图即封面语义：带图保存一律 isCover=true（换图须替换封面并清理旧图，而非只置空时补位）。
+      if (imageB64 !== '') adapter.saveImage(saved.id, { FImage: imageB64, FThumbImage: imageThumbB64, isCover: isMold(strFunc) })
+      else if (imageDelete && isMold(strFunc)) adapter.deleteImage(saved.id)
+      const row = isMold(strFunc) ? adapter.getMold(saved.id) : adapter.getPage(strFunc, saved.id)
+      const codeVal = row ? String(row['单据编号'] ?? row['模具编号'] ?? row['部件编号'] ?? row['报修单号'] ?? row['记录单号'] ?? '') : ''
+      sendJson(res, 200, {
+        ok: true,
+        strFunc,
+        value: String(saved.id),
+        desc: `单据编号${codeVal}`,
+        message: '',
+        result: { FInterID: saved.id, FBillNo: codeVal, FCreater: operator.current(), FCreateDate: row ? row['创建时间'] : '', FileList: [] },
+      })
+    })
+  }
+
+  routes[`${prefix}/pushdo`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    // 下推：按源页 strFunc + FRuleID 载入源单据契约行，映射生成目标新单据预填包 NextRow（{H:[head],[tab]:[rows]}）。
+    // 失败一律如实上抛 {ok:false,message}（W4）；目标 metaKey 键由 personal.push.js 规则表显式声明，路由零字段 switch。
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      try {
+        // 下推前置（企业同义）：可审核源单必须已审核才能下推；档案类页（模具/方案等，无审核列）不受门槛。
+        const firstFid = (() => {
+          const rows = Array.isArray(source.Rows) ? source.Rows : []
+          const c = rows[0] && typeof rows[0] === 'object' ? rows[0] : {}
+          return String(c['单据内码'] ?? c.FInterID ?? '')
+        })()
+        if (auditableColOf(strFunc) !== '' && firstFid !== '' && adapter.getBillStatus(strFunc, firstFid) !== '1') {
+          sendJson(res, 200, { ok: false, strFunc, desc: '', message: `${adapter.billLabelById(strFunc, firstFid)}未审核，不能下推（请先审核源单）` })
+          return
+        }
+        const value = buildPushNextRow(adapter, source)
+        // 多选下推语义显性化（2026-11-21 按钮审计 B3d）：本端点按首条源单预填一张目标单，其余选中行不自动生成。
+        // 旧实现零提示 → 用户框选 3 张以为出了 3 张单。文案由 ListView doPush 原样 toast，不改前端契约。
+        const selCount = (Array.isArray(source.Rows) ? source.Rows : []).length
+        const multiHint = selCount > 1 ? `已按首条选中单据生成预填单（其余 ${selCount - 1} 条未下推，请逐条操作）` : ''
+        sendJson(res, 200, { ok: true, strFunc, value, desc: '', message: multiHint })
+      } catch (e) {
+        sendJson(res, 200, { ok: false, strFunc, desc: '', message: String((e && e.message) || e) })
+      }
+    })
+  }
+
+  routes[`${prefix}/billstatus`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const d = source.Data && typeof source.Data === 'object' ? source.Data : {}
+      const targetStatus = String(d.TargetStatus ?? '')
+      const fids = (Array.isArray(d.fids) ? d.fids : []).map((x) => String(x ?? '').trim()).filter((x) => x !== '')
+      if (!['2', '5', '1'].includes(targetStatus)) { sendJson(res, 200, { ok: false, strFunc, desc: '', message: unsupportedStatus(targetStatus) }); return }
+      if (fids.length === 0) { sendJson(res, 200, { ok: false, strFunc, desc: '', message: '未选中数据行（需要单据内码）' }); return }
+      try {
+        // 审核/反审核/删除：前置校验（存在性+状态机+审核锁+下游引用）全部先于首次写入，
+        // 整批要么全成功要么不动库（企业批量审核同义，防半批状态）。
+        // 删除同样必须整批预检：旧实现逐行执行，中途撞「已审核」时前面几行已真删、后面才报错，
+        // 用户看到失败提示却已丢单（2026-11-20 temp 库取证 D2 实测，本轮按需求收口）。
+        if (targetStatus === '2') {
+          const blocked = fids.map((fid) => adapter.deleteBlockReason(strFunc, fid)).filter((b) => b.kind !== 'ok')
+          if (blocked.length) {
+            const audited = blocked.filter((b) => b.kind === 'audited')
+            const parts = []
+            if (audited.length) parts.push(`${audited.slice(0, 3).map((b) => b.label).join('、')}${audited.length > 3 ? ` 等 ${audited.length} 张` : ''}已审核，不能删除，请先反审核`)
+            // 同因合并（与审核分支同口径）：多张同为「已不存在」不重复刷屏
+            const rest = blocked.filter((x) => x.kind !== 'audited')
+            const blockedMsgs = [...new Set(rest.map((b) => b.msg))]
+            for (const m of blockedMsgs.slice(0, 2)) parts.push(m)
+            if (blockedMsgs.length > 2) parts.push(`另有 ${blockedMsgs.length - 2} 类其它限制`)
+            throw new Error(`${parts.join('；')}${fids.length > blocked.length ? `（本次选中 ${fids.length} 张，均未删除）` : ''}`)
+          }
+          for (const fid of fids) { if (isMold(strFunc)) adapter.deleteMold(fid); else adapter.deletePage(strFunc, fid) }
+        } else {
+          // 审核/反审核走与删除同一套「只读整批预检 + 按 kind 聚合」：旧文案「单据已审核，请勿重复操作」
+          // 不指认是哪一张，多选时用户无从下手（2026-11-21 按钮审计 B1b/B2b 取证）。
+          // 反审核的下游引用拦截已内置 statusBlockReason（kind='downstream'），不再另跑一遍单条断言。
+          const blocked = fids.map((fid) => adapter.statusBlockReason(strFunc, fid, targetStatus)).filter((b) => b.kind !== 'ok')
+          if (blocked.length) {
+            const stateOnes = blocked.filter((b) => b.kind === 'repeat' || b.kind === 'notaudited')
+            const others = blocked.filter((b) => b.kind !== 'repeat' && b.kind !== 'notaudited')
+            const parts = []
+            if (stateOnes.length) {
+              const tail = targetStatus === '5' ? '已审核，无需重复审核（如需改动请先反审核）' : '未审核，不能反审核（请先审核该单）'
+              parts.push(`${stateOnes.slice(0, 3).map((b) => b.label).join('、')}${stateOnes.length > 3 ? ` 等 ${stateOnes.length} 张` : ''}${tail}`)
+            }
+            // 同因合并（2026-11-21 live 指纹 L2 实锤）：多张同为「已不存在」时逐条 push 会把同一句重复拼两遍
+            const otherMsgs = [...new Set(others.map((b) => b.msg))]
+            for (const m of otherMsgs.slice(0, 2)) parts.push(m)
+            if (otherMsgs.length > 2) parts.push(`另有 ${otherMsgs.length - 2} 类其它限制`)
+            // 状态类句子自带收尾括号，未变更声明改用逗号接续，避免出现「）（」双括号排版
+            throw new Error(`${parts.join('；')}${fids.length > blocked.length ? `，本次选中 ${fids.length} 张均未变更审核状态` : ''}`)
+          }
+          for (const fid of fids) adapter.updateBillStatusCol(strFunc, fid, targetStatus === '5' ? '1' : '0', operator.current())
+        }
+      } catch (e) {
+        sendJson(res, 200, { ok: false, strFunc, desc: '', message: String((e && e.message) || e) })
+        return
+      }
+      sendJson(res, 200, { ok: true, strFunc, value: '', desc: '', message: '' })
+    })
+  }
+
+  routes[`${prefix}/image`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      const id = typeof source.id === 'string' || typeof source.id === 'number' ? String(source.id).trim() : ''
+      if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, { ok: false, code: 'FAIL', dataUrl: '', message: `未知或未接入的页面 strFunc：${JSON.stringify(strFunc)}` }); return }
+      if (id === '') { sendJson(res, 200, { ok: false, code: 'FAIL', dataUrl: '', message: '缺少记录内码 id' }); return }
+      // 图片仅为模具档案能力；补齐子页无图片字段，如实回未接入（不跨表误取模具封面）。
+      if (!isMold(strFunc)) { sendJson(res, 200, { ok: false, code: 'NOT_WIRED', dataUrl: '', message: '个人版该页未接入图片能力' }); return }
+      const { dataUrl } = adapter.getImage({ id, thumb: source.thumb === true || source.thumb === 1 || source.thumb === '1' })
+      sendJson(res, 200, { ok: true, dataUrl, message: '' })
+    })
+  }
+
+  // /popdata：个人版下拉走 /billinit Info._options 直供，dropdSet 恒空、前端不会触达；
+  // 保留端点如实回未接入（W4：不伪造行集）。
+  routes[`${prefix}/popdata`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, () => {
+      sendJson(res, 200, { ok: false, strFunc: '', value: { data: [] }, desc: '', message: '个人版未接入在线下拉数据源' })
+    })
+  }
+
+  // /item：基础资料页（item 页型）整表读取（服务端不分页）。出参逐键镜像企业 itemQueries.getItem。
+  routes[`${prefix}/item`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !isItemStrFunc(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const filterForm = source.filterForm && typeof source.filterForm === 'object' ? source.filterForm : null
+      sendJson(res, 200, adapter.listItem(strFunc, filterForm))
+    })
+  }
+
+  // /itemdo：基础资料写（add/addgroups/update/delete/ban/enable）。出参逐键镜像企业 itemWriteQueries.itemDataOperate。
+  routes[`${prefix}/itemdo`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const fItemType = typeof source.FItemType === 'string' ? source.FItemType.trim() : ''
+      if (fItemType === '' || !isItemStrFunc(fItemType)) {
+        sendJson(res, 200, { ok: false, code: 'FAIL', strFunc: String(source.strFunc ?? ''), value: '', desc: '', message: `未知或未接入的基础资料类别：${JSON.stringify(fItemType)}` })
+        return
+      }
+      sendJson(res, 200, adapter.itemOperate(source))
+    })
+  }
+
+  // /colset：列显示设置读/写（与企业版同契约 {op:'get'|'save', FPage, arrColSet}，个人版落 app_setting）。
+  // 客户端切列表视图会主动 POST /colset(op=get) 取个性化列宽；无已存配置回 value:[] 走默认（非 405）。
+  routes[`${prefix}/colset`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 1048576, (source) => {
+      const op = source.op === 'save' ? 'save' : 'get'
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      const FPage = typeof source.FPage === 'string' ? source.FPage.trim() : ''
+      if (FPage === '') { sendJson(res, 200, { ok: false, strFunc, op, message: '页面设置编码为空' }); return }
+      if (op === 'get') {
+        sendJson(res, 200, { ok: true, strFunc, op: 'get', value: adapter.getColset(FPage), message: '' })
+        return
+      }
+      const saved = adapter.saveColset(FPage, Array.isArray(source.arrColSet) ? source.arrColSet : [])
+      sendJson(res, 200, { ok: true, strFunc, op: 'save', value: saved, message: '' })
+    })
+  }
+
+  // /report：报表页（report/reportmulti 页型）本地 SQLite 重算。出参逐键镜像企业 localApi.report
+  //   {ok,head,data,totalCount,reportFilter,funcSetes,actions,[RptTABGroup,RptTAB]}；dtfilter 兼容对象/数组首元。
+  routes[`${prefix}/report`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 65536, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !isReportStrFunc(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const dtfilter = source.dtfilter && typeof source.dtfilter === 'object' && !Array.isArray(source.dtfilter)
+        ? source.dtfilter
+        : (Array.isArray(source.dtfilter) && source.dtfilter[0] && typeof source.dtfilter[0] === 'object' ? source.dtfilter[0] : null)
+      sendJson(res, 200, buildReport(adapter, { strFunc, dtfilter }))
+    })
+  }
+
+  // /reportdetail：多页签报表页签明细（主表聚焦行 dtFoucuseRow[0] + 当前页签 strTab）。出参 {ok,data:[行按中文列键]}。
+  routes[`${prefix}/reportdetail`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 262144, (source) => {
+      const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
+      if (strFunc === '' || !isReportStrFunc(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
+      const strTab = typeof source.strTab === 'string' ? source.strTab : ''
+      sendJson(res, 200, buildReportDetail(adapter, { strFunc, strTab, dtFoucuseRow: Array.isArray(source.dtFoucuseRow) ? source.dtFoucuseRow : [] }))
+    })
+  }
+
+  // 阶段 3 记模次/记维护 HTTP 入口（与 AI 工具同源 adapter 事务）：手机快捷栏/扫码场景消费。
+  // /usage：usage_log 插入 + used_shots 原子累加；/maintenance：maintenance_log（保养联动周期重置）。
+  routes[`${prefix}/usage`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 262144, (source) => {
+      const row = adapter.getMoldByCode(source.moldCode)
+      if (!row) { sendJson(res, 200, { ok: false, message: `模具编号「${String(source.moldCode ?? '')}」不存在（请先建档）` }); return }
+      const delta = Number(source.deltaShots)
+      if (!Number.isInteger(delta) || delta <= 0) { sendJson(res, 200, { ok: false, message: '本次新增模次必须为正整数' }); return }
+      try {
+        const r = adapter.addUsage(Number(row['单据内码']), { delta_shots: delta, machine_no: String(source.machineNo || ''), remark: String(source.remark || ''), log_date: String(source.logDate || '') || undefined })
+        sendJson(res, 200, { ok: true, moldCode: row['模具编号'], usedShots: Number(r.used_shots), message: `本次 +${delta} 模` })
+      } catch (e) {
+        sendJson(res, 200, { ok: false, message: String((e && e.message) || e) })
+      }
+    })
+  }
+  routes[`${prefix}/maintenance`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 262144, (source) => {
+      const row = adapter.getMoldByCode(source.moldCode)
+      if (!row) { sendJson(res, 200, { ok: false, message: `模具编号「${String(source.moldCode ?? '')}」不存在（请先建档）` }); return }
+      const logType = String(source.logType || '')
+      if (!['点检', '保养', '维修'].includes(logType)) { sendJson(res, 200, { ok: false, message: '记录类型必须为 点检/保养/维修' }); return }
+      try {
+        const r = adapter.addMaintenance(Number(row['单据内码']), { log_type: logType, result: String(source.result || ''), operator: String(source.operator || ''), cost: Number(source.cost) || 0, remark: String(source.remark || ''), log_date: String(source.logDate || '') || undefined })
+        sendJson(res, 200, { ok: true, moldCode: row['模具编号'], shotsAtLog: Number(r.shots_at_log), message: `${logType}已记录` })
+      } catch (e) {
+        sendJson(res, 200, { ok: false, message: String((e && e.message) || e) })
+      }
+    })
+  }
+
+  // 企业版独有功能族诚实落点（扫雷暗雷：客户端 dp 工具栏/选项 会主动 POST 这三路，
+  // 无路由即裸 HTTP 404 英文 toast）：与 /popdata 同口径能力裁剪走数据，如实回 ok:false 中文原因。
+  const notWired = (what) => ({ ok: false, strFunc: '', value: '', desc: '', message: `个人版暂不支持「${what}」（属企业版同源能力，未在个人能力闭环内）` })
+  routes[`${prefix}/export`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 262144, (source) => sendJson(res, 200, { ...notWired('引出'), strFunc: String(source.strFunc ?? '') }))
+  }
+  routes[`${prefix}/imp`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 262144, (source) => sendJson(res, 200, { ...notWired('引入'), strFunc: String(source.strFunc ?? '') }))
+  }
+  routes[`${prefix}/filterset`] = (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    readJsonBody(req, res, 262144, (source) => sendJson(res, 200, { ...notWired('过滤条件设置'), strFunc: String(source.strFunc ?? '') }))
+  }
+
+  return routes
+}
+
+/** Host 入口（与企业版同构）：resolveConfig → 打开本地库 → 注册路由。 */
+export function apply(ctx, config = {}) {
+  const runtime = {
+    // routePrefix 语义与企业版 patch 对齐：config.routePrefix=模块前缀（如 '/m10-mold-personal'），
+    // 路由统一挂 `${routePrefix}/api/*`（与企业版 makeRoutes(routePrefix) 同口径）。
+    routePrefix: String((config && config.routePrefix) || '/m10-mold-personal').replace(/\/+$/, ''),
+    dataDir: resolveDataDir(config && config.dataDir),
+  }
+  const apiPrefix = `${runtime.routePrefix}/api`
+  const adapter = new PersonalSqliteAdapter({ dataDir: runtime.dataDir, seed: { dicts: true, sampleMolds: config.sampleMolds === true } })
+  const operator = makeOperator(ctx)
+  const routes = createRoutes(adapter, apiPrefix, operator)
+  // 阶段 3 AI 工具（设计稿 §2.2.4 aiTools）：查模/记模次/记保养/预警，零依赖平对象注册（个人版不引 dsh-tools）。
+  registerPersonalTools(ctx, adapter)
+  // webServer 为可选注入依赖：与企业版同用 ctx.inject(['webServer'], scope => ...) 动态声明，
+  // 否则 cordis 会以「cannot get property "webServer" without inject」拒绝挂载路由（本包入口不激活）。
+  ctx.inject(['webServer'], (scope) => {
+    for (const [path, handler] of Object.entries(routes)) {
+      scope.effect(() =>
+        scope.webServer.register({
+          kind: 'exact',
+          path,
+          handler: (req, res) => {
+            try {
+              const r = handler(req, res)
+              if (r && typeof r.catch === 'function') r.catch((e) => { if (!res.writableEnded) sendJson(res, 200, { ok: false, message: String((e && e.message) || e) }) })
+            } catch (e) {
+              if (!res.writableEnded) sendJson(res, 200, { ok: false, message: String((e && e.message) || e) })
+            }
+          },
+        }),
+      )
+    }
+  })
+  ctx.effect(() => () => adapter.close())
+  return { adapter, routes, runtime }
+}

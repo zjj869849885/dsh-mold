@@ -1,0 +1,8 @@
+# 个人版发布仓：本仓只应包含插件包自身（零依赖 raw ESM）
+node_modules/
+*.log
+*.db
+*.sqlite
+*.db-journal
+.DS_Store
+Thumbs.db

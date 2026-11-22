@@ -1,0 +1,5 @@
+# 全量按 LF 落库：产物 client.js 需与开发仓逐字节一致，供 mtime/体积/指纹比对
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.svg text eol=lf

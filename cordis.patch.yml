@@ -1,0 +1,30 @@
+# Bundle patch for dsh-plugin-m10-mold-personal（个人版模具插件 · 阶段 2 p2c）。
+#
+# 与企业版 dsh-plugin-m10-mold-web 的 patch 逐字段对照，差异只在【去网关 + 本地数据目录】：
+#   - 个人版完全本地离线（node:sqlite），无任何企业网关依赖，故企业版的
+#     baseUrl / cookie / oid / mid / user / cookieFile / credentialFile 六项【整体删除】；
+#     删除后本包体物理不含网关重登与远程数据库依赖路径（配合 build.profiles.json forbiddenTokens 隔离守卫，坑5）。
+#   - 数据落在 dataDir（默认 ~/.m10-mold-personal，可用本项或环境变量 M10_PERSONAL_DATADIR 覆盖），
+#     与插件包解耦，升级/重装插件不丢用户数据（设计稿 §需求1）。
+#
+# 行 id 同时是侧栏面板 id 与 `main` 插槽 key（与个人 web 构建后 client.js 的 PANEL_ID 严格同值，
+# 由 client-src/module.config.ts 编译期注入、buildAllWeb 覆盖为 'm10-mold-personal'，见 p2d）；
+# 与企业版 m10-mold-web、桌面端 m10-mold 三者互不冲突。
+#
+# name 必须写「包名」而非 server 文件的 file:/// URL：harness 要把本行 name 解析成包，
+# 才能读到该包 package.json 的 dsh.client（装载 client bundle）与 dsh.bundle.patch，
+# server 面走 exports["."] → ./server/index.js。写成裸文件 URL 会导致 dsh.client 永不被发现。
+- insert:
+    - id: m10-mold-personal
+      name: 'dsh-plugin-m10-mold-personal'
+      config:
+        # 路由前缀参数化：本包 11 条路由挂 /m10-mold-personal/api/*（server/index.js apply() 读取，
+        # 与企业版 makeRoutes(routePrefix) 同口径），与 /m10-mold-web、/m10-mold 隔离。
+        routePrefix: '/m10-mold-personal'
+        moduleKey: 'mold'
+        # 【可选】本地数据目录绝对路径；缺省走 ~/.m10-mold-personal（resolveDataDir 优先级：
+        # 本项 > 环境变量 M10_PERSONAL_DATADIR > ~/.m10-mold-personal）。首启自动建
+        # dataDir/{images,backups} 目录树 + 建库迁移（user_version=1）+ 幂等灌默认字典（OOBE）。
+        # dataDir: 'D:/M10PersonalData'
+        # 【可选】首启是否附带一条示例模具（便于开箱即见数据）；缺省 false，仅灌字典不造业务数据。
+        # sampleMolds: true
