@@ -6,10 +6,11 @@
 //   GET  /version /pages /org
 //   POST /filter /data /billinit /detail /save /billstatus /image /popdata /item /itemdo /colset
 // 失败一律如实上抛为 {ok:false,message}（W4），不做防御性兜底。
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
+import { spawn, execFile } from 'node:child_process'
 import { PersonalSqliteAdapter, mimeOf } from './sqlite/adapter.js'
 import { resolveDataDir } from './sqlite/db.js'
 import { buildBillInit, buildDataHead, NUMERIC_METAKEYS } from './sqlite/personal.schema.js'
@@ -382,6 +383,31 @@ async function probeLanAlive(baseUrl, apiPrefix) {
  * 主机 IANA 时区（阶段 5 多时区显示层锚点）：库内 datetime 是主机本地墙钟（jsonNorm 用 UTC 取值器输出无偏移 yyyy-MM-dd HH:mm:ss），
  * 前端需知道这堵墙钟属于哪个时区才能正确换算到浏览设备时区。取运行本插件的 Node 进程 OS 时区，纯新增、异常回空串。
  */
+/** 本机首个非内部 IPv4（多端 IP 漂移提醒 v0.2.0）：供设置页对比 grant 记录的 IP，判断局域网 IP 是否已变。 */
+function hostLanIp() {
+  try {
+    const ifaces = os.networkInterfaces()
+    for (const k of Object.keys(ifaces)) {
+      for (const a of ifaces[k] || []) {
+        if ((a.family === 'IPv4' || a.family === 4) && !a.internal && !String(a.address).startsWith('169.254.')) return String(a.address)
+      }
+    }
+  } catch { /* ignore */ }
+  return ''
+}
+/** 仅本机回环可调（多端一键启停 v0.2.0）：手机侧/远程请求一律拒绝，避免任意设备触发启停。 */
+function isLoopbackReq(req) {
+  const ra = String((req && req.socket && req.socket.remoteAddress) || '')
+  return ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1'
+}
+/** 随插件发布的局域网启停脚本绝对路径（相对 server 目录，绝不硬编码工作区/绝对盘符）。 */
+function lanScriptPath() {
+  try {
+    const p = join(HERE, '..', 'scripts', 'personalLan.ps1')
+    return existsSync(p) ? p : ''
+  } catch { return '' }
+}
+let lanCtlBusy = false
 function detectHostTz() {
   try { return String(Intl.DateTimeFormat().resolvedOptions().timeZone || '') } catch { return '' }
 }
@@ -472,7 +498,7 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     }
     const body = JSON.stringify({
       ok: true, name: PKG.name, version: readPkgVersion(), runningVersion: String(PKG.version), hotReloadAvailable: !!hotReloadGetter, edition: EDITION, schemaVersion: adapter.schemaVersion,
-      lanUrl, hostTz: detectHostTz(),
+      lanUrl, hostTz: detectHostTz(), hostLanIp: hostLanIp(),
       lanBindable: bind.lanBindable, bindAddress: bind.bindAddress,
       lanInstance,
     })
@@ -534,6 +560,42 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
       if (hotScheduled) setTimeout(() => { void hotReloadSelf() }, 800)
     } catch (e) {
       sendJson(res, 200, { ok: false, message: '更新失败：' + String((e && e.message) || e) })
+    }
+  }
+
+  // /lan-start、/lan-stop：桌面 App（回环侧）一键启停局域网实例（多端 A v0.2.0）。
+  // 仅本机回环可调（手机侧/远程一律 403）；调用随插件发布的 scripts/personalLan.ps1：
+  // start 为 fire-and-forget（脚本自带幂等/防火墙/grant 落盘，最长轮询约 55s），stop 同步等待；结果由前端轮询 /version lanInstance.alive 判定。
+  routes[`${prefix}/lan-start`] = async (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    if (!isLoopbackReq(req)) { sendJson(res, 403, { ok: false, message: '仅允许在本机桌面 App 内操作' }); return }
+    const script = lanScriptPath()
+    if (!script) { sendJson(res, 200, { ok: false, message: '未找到局域网启动脚本 scripts/personalLan.ps1' }); return }
+    if (lanCtlBusy) { sendJson(res, 200, { ok: false, busy: true, message: '局域网实例正在启动中，请稍候' }); return }
+    lanCtlBusy = true
+    setTimeout(() => { lanCtlBusy = false }, 75000)
+    try {
+      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'start'], { detached: true, stdio: 'ignore', windowsHide: true })
+      child.unref()
+      sendJson(res, 200, { ok: true, started: true, message: '正在启动局域网实例，请稍候…' })
+    } catch (e) {
+      lanCtlBusy = false
+      sendJson(res, 200, { ok: false, message: '启动失败：' + String((e && e.message) || e) })
+    }
+  }
+
+  routes[`${prefix}/lan-stop`] = async (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+    if (!isLoopbackReq(req)) { sendJson(res, 403, { ok: false, message: '仅允许在本机桌面 App 内操作' }); return }
+    const script = lanScriptPath()
+    if (!script) { sendJson(res, 200, { ok: false, message: '未找到局域网启动脚本 scripts/personalLan.ps1' }); return }
+    try {
+      const out = await new Promise((resolveP) => {
+        execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'stop'], { windowsHide: true, timeout: 20000 }, (err, stdout) => resolveP(String(stdout || (err && err.message) || '')))
+      })
+      sendJson(res, 200, { ok: true, output: String(out).trim().slice(0, 200) })
+    } catch (e) {
+      sendJson(res, 200, { ok: false, message: '停止失败：' + String((e && e.message) || e) })
     }
   }
 
