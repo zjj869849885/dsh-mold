@@ -212,6 +212,27 @@ function detectLanBase(req) {
 }
 
 /**
+ * 本机服务真实监听绑定形态（多端排障 2026-11-22）：桌面 App 形态宿主固定 --host 127.0.0.1 --port 0，
+ * 只监听回环 + 随机端口，手机经局域网必然连不通，而 detectLanBase 仍会拼出「首个非内部 IPv4 + 当前端口」的
+ * 幻影地址。故如实回报监听绑定地址与可达结论，供设置页收口地址/二维码展示，不再误导用户查 WiFi 与防火墙。
+ * 取不到监听地址时如实回 unknown，并按可达处理（维持旧行为，绝不凭猜测报警）。
+ */
+function detectLanBindable(req) {
+  let addr = ''
+  try {
+    const srv = req && req.socket && req.socket.server
+    const a = srv && typeof srv.address === 'function' ? srv.address() : null
+    addr = String((a && a.address) || '')
+  } catch {
+    addr = ''
+  }
+  if (!addr) return { bindAddress: '', lanBindable: true }
+  const x = addr.replace(/^\[|\]$/g, '')
+  const loopback = x === '::1' || x === '0:0:0:0:0:0:0:1' || /^127\./.test(x) || /^::ffff:127\./.test(x)
+  return { bindAddress: x, lanBindable: !loopback }
+}
+
+/**
  * 主机 IANA 时区（阶段 5 多时区显示层锚点）：库内 datetime 是主机本地墙钟（jsonNorm 用 UTC 取值器输出无偏移 yyyy-MM-dd HH:mm:ss），
  * 前端需知道这堵墙钟属于哪个时区才能正确换算到浏览设备时区。取运行本插件的 Node 进程 OS 时区，纯新增、异常回空串。
  */
@@ -290,7 +311,12 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
 
   routes[`${prefix}/version`] = (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
-    const body = JSON.stringify({ ok: true, name: PKG.name, version: PKG.version, edition: EDITION, schemaVersion: adapter.schemaVersion, lanUrl: detectLanBase(req), hostTz: detectHostTz() })
+    const bind = detectLanBindable(req)
+    const body = JSON.stringify({
+      ok: true, name: PKG.name, version: PKG.version, edition: EDITION, schemaVersion: adapter.schemaVersion,
+      lanUrl: detectLanBase(req), hostTz: detectHostTz(),
+      lanBindable: bind.lanBindable, bindAddress: bind.bindAddress,
+    })
     res.writeHead(200, JSON_HEADERS_OK)
     res.end(req.method === 'HEAD' ? undefined : body)
   }
