@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "DSH Mold (Personal)",
-    "description": "DSH mold management, personal offline edition: a self-contained local data layer on node:sqlite with zero external/gateway dependencies. DP list pages rendered natively inside the design-token system; routes served under /m10-mold-personal/api/*."
+    "title": "AI Mold Manager (Personal)",
+    "description": "AI mold management, personal offline edition: a self-contained local data layer on node:sqlite with zero external/gateway dependencies. DP list pages rendered natively inside the design-token system; routes served under /m10-mold-personal/api/*."
   }
 }
