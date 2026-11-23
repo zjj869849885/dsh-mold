@@ -239,18 +239,13 @@ Invoke-WebRequest -Uri 'http://<本机IP>:3081/m10-mold-personal/api/version' -U
 
 ## 多端 / 当主机（局域网手机访问）
 
-桌面 App 形态的宿主固定只监听 127.0.0.1，手机无法访问，这是宿主设计而非安装失败。要让某台电脑成为局域网主机：
+桌面 App 形态的宿主固定只监听 127.0.0.1，手机无法直接访问宿主端口。本插件已内置**进程内独立局域网 HTTP 服务（零外部依赖）**：
 
-1. 该电脑需装 Node.js（>=22）与 DeepSeek Harness Web 形态宿主目录（含 `apps/cli/src/bin.ts` 与 `node_modules`，可从主机电脑整体复制）。
-2. 在桌面 App「插件管理」粘贴本仓库地址安装插件（本包即插件，已完成可跳过）。
-3. 运行随包脚本（脚本在插件安装目录，一般为 `%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-plugin-m10-mold-personal\scripts\personalLan.ps1`）：
+1. **一键开启（推荐，无需额外部署 Node.js 或宿主源码目录）**：
+   - 在任何安装了桌面 App 与本插件的电脑上，进入「M10 模具 → 设置 → 手机局域网访问」，点击 **「启动局域网实例」**。
+   - 插件会在当前进程内直接启动 `0.0.0.0:3081` 独立 Web 服务（共用同一个 SQLite 数据库连接，内联 React 运行时），1 秒内自动生成带免登录 Token 的二维码。
+   - 手机或局域网内其他电脑在同一路由器/Wi-Fi 下直接扫码（或复制含 token 的访问地址打开）即可全屏进入模具管理系统。
+2. **命令行脚本方式（可选，仅适用于部署了完整 Web 宿主源码仓的主机）**：
+   - 随包保留 `scripts/personalLan.ps1`（`start / stop / status / autostart / unautostart`），供需要在无桌面 App 的源码宿主环境下后台常驻时使用。
 
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File <插件安装目录>\scripts\personalLan.ps1 start
-   ```
-
-   脚本自动：探测本机局域网 IP → 起 personal 实例 → 登记授权文件（设置页二维码免登录的关键）→ 检查防火墙（创建规则失败时以管理员运行一次即可）。
-4. 手机/其它设备在同一路由器下打开 `http://<本机局域网IP>:3081`，或刷新桌面 App 设置页扫自动生成的二维码。
-
-`stop / status / autostart（开机自启）/ unautostart` 同理替换末尾动作；可选参数 `-Port`、`-IP`、`-HostRoot`。
-多份数据口径：每台电脑各自一套本地账套；要共享同一份数据，其它设备直接用浏览器访问主机地址即可，无需重复安装。
+多份数据口径：每台安装插件的电脑各自一套本地账套；要多端共享同一份数据，手机或其他电脑直接通过浏览器扫码/打开主机局域网地址即可，无需在从机重复安装插件。

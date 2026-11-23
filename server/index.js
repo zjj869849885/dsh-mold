@@ -6,10 +6,12 @@
 //   GET  /version /pages /org
 //   POST /filter /data /billinit /detail /save /billstatus /image /popdata /item /itemdo /colset
 // 失败一律如实上抛为 {ok:false,message}（W4），不做防御性兜底。
-import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
+import { createServer } from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import { PersonalSqliteAdapter, mimeOf } from './sqlite/adapter.js'
 import { resolveDataDir } from './sqlite/db.js'
@@ -413,6 +415,231 @@ function lanScriptPath() {
   } catch { return '' }
 }
 let lanCtlBusy = false
+
+// ───────── 进程内独立局域网 HTTP 服务（多端零外部依赖方案） ─────────
+// 解决问题：别的电脑只装了桌面版 App + 插件，没有全局 Node.js 或几百 MB 的 Harness 源码仓（apps/cli/src/bin.ts），
+// 原 personalLan.ps1 拉起外部宿主必然失败并卡 60 秒超时。
+// 现改为直接在当前插件 Node 进程内起 node:http 监听 0.0.0.0:3081，复用同一套 routes 与 SQLite adapter，
+// 并直出内联了 React 18 运行时的单页 Web 应用（client.js），任何电脑零配置秒启动。
+const DEFAULT_LAN_PORT = 3081
+let inProcLan = null // { server, port, token, ip, lanUrl, grantUrl, startedAt }
+
+function writeLanGrantJson(info) {
+  const p = lanGrantFilePath()
+  if (!p) return
+  try {
+    mkdirSync(dirname(p), { recursive: true })
+    writeFileSync(p, JSON.stringify({
+      ip: info.ip,
+      port: info.port,
+      lanUrl: info.lanUrl,
+      token: info.token,
+      pid: process.pid,
+      mode: 'inproc',
+      startedAt: info.startedAt,
+    }))
+  } catch { /* ignore */ }
+}
+
+function removeLanGrantJsonIfSelf() {
+  const p = lanGrantFilePath()
+  if (!p || !existsSync(p)) return
+  try {
+    const j = JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, ''))
+    if (j && (j.pid === process.pid || j.mode === 'inproc')) rmSync(p, { force: true })
+  } catch { /* ignore */ }
+}
+
+function ensureWindowsFirewall() {
+  if (process.platform !== 'win32') return
+  try {
+    const exe = process.execPath
+    const cmd = `$exe = '${exe.replace(/'/g, "''")}'; $ok = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue | Where-Object { ($_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program -eq $exe }; if (-not $ok) { New-NetFirewallRule -DisplayName 'DSH Personal LAN (in-process)' -Direction Inbound -Action Allow -Program $exe -Profile Any -ErrorAction SilentlyContinue | Out-Null }`
+    const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { detached: true, stdio: 'ignore', windowsHide: true })
+    child.unref()
+  } catch { /* 非管理员或受限环境静默跳过，不阻断服务 */ }
+}
+
+function parseCookies(req) {
+  const out = {}
+  const raw = String((req.headers && req.headers.cookie) || '')
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq > 0) out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim()
+  }
+  return out
+}
+
+// /version 调用方是否可信：本机回环，或携带有效局域网 token/Cookie。
+// 安全门（v0.3.0）：/version 在进程内 LAN 服务里免鉴权（探活用），若不门控会把含 token 的 grantUrl
+// 泄给局域网匿名请求，拿到即可绕过全部 401 拦截；匿名侧只给 alive/url，不给 grantUrl。
+function lanCallerTrusted(req) {
+  try {
+    if (isLoopbackReq(req)) return true
+    if (!inProcLan || !inProcLan.token) return false
+    const u = new URL(req.url || '/', 'http://localhost')
+    const q = u.searchParams.get('token') || ''
+    const c = parseCookies(req)['m10_lan_token'] || ''
+    return q === inProcLan.token || c === inProcLan.token
+  } catch { return false }
+}
+
+function buildStandaloneHtml() {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>M10 AI 模具（个人版）</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <style>
+    html, body, #m10-standalone-root {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      overflow: hidden; background: #f5f6f7;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+  </style>
+</head>
+<body>
+  <div id="m10-standalone-root"></div>
+  <script src="/client.js"></script>
+</body>
+</html>`
+}
+
+async function startInProcLanServer(routes, prefix, port = DEFAULT_LAN_PORT) {
+  const curIp = hostLanIp() || '127.0.0.1'
+  if (inProcLan && inProcLan.server && inProcLan.server.listening) {
+    if (inProcLan.ip !== curIp && curIp !== '127.0.0.1') {
+      inProcLan.ip = curIp
+      inProcLan.lanUrl = `http://${curIp}:${inProcLan.port}`
+      inProcLan.grantUrl = `${inProcLan.lanUrl}/?token=${inProcLan.token}`
+      writeLanGrantJson(inProcLan)
+    }
+    return { ok: true, already: true, info: inProcLan }
+  }
+  const token = randomBytes(18).toString('base64url')
+  const clientJsPath = join(HERE, '..', 'client.js')
+  const iconPath = join(HERE, '..', 'icon.svg')
+
+  const srv = createServer((req, res) => {
+    try {
+      const u = new URL(req.url || '/', 'http://localhost')
+      const pathname = u.pathname
+      // 1. 静态图标与版本探针免鉴权（供 probeLanAlive 与浏览器标签图标加载）
+      if (pathname === `${prefix}/version` && routes[pathname]) {
+        const r = routes[pathname](req, res)
+        if (r && typeof r.catch === 'function') r.catch((e) => { if (!res.writableEnded) sendJson(res, 200, { ok: false, message: String((e && e.message) || e) }) })
+        return
+      }
+      if (pathname === '/icon.svg' || pathname === '/favicon.ico') {
+        if (existsSync(iconPath)) {
+          res.writeHead(200, { 'content-type': 'image/svg+xml', 'cache-control': 'public, max-age=3600' })
+          res.end(readFileSync(iconPath))
+        } else {
+          res.writeHead(204); res.end()
+        }
+        return
+      }
+
+      // 2. Token / Cookie 鉴权（本机回环请求或携带有效 token/cookie 均放行）
+      const qToken = u.searchParams.get('token') || ''
+      const cookies = parseCookies(req)
+      const cToken = cookies['m10_lan_token'] || ''
+      const activeToken = (inProcLan && inProcLan.token) || token
+      const authed = isLoopbackReq(req) || (qToken && qToken === activeToken) || (cToken && cToken === activeToken)
+
+      if (!authed) {
+        if (pathname.startsWith(prefix + '/')) {
+          sendJson(res, 401, { ok: false, sessionExpired: true, message: '未授权或会话已过期，请在电脑端设置页重新扫码访问' })
+        } else {
+          res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>需要扫码授权</title></head><body style="font-family:system-ui,sans-serif;padding:32px;text-align:center;color:#333;"><h3>访问未授权或已过期</h3><p>请在电脑端「设置 → 手机局域网访问」中扫描二维码打开本页面。</p></body></html>')
+        }
+        return
+      }
+
+      // 若 URL 携带有效 token，种下 HttpOnly Cookie，后续 API / 刷新免带参数
+      const setCookieHdr = (qToken && qToken === activeToken)
+        ? `m10_lan_token=${activeToken}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax`
+        : ''
+
+      // 3. 前端脚本产物
+      if (pathname === '/client.js') {
+        if (!existsSync(clientJsPath)) {
+          res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('client.js not found')
+          return
+        }
+        const headers = { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-store' }
+        if (setCookieHdr) headers['set-cookie'] = setCookieHdr
+        res.writeHead(200, headers)
+        res.end(readFileSync(clientJsPath))
+        return
+      }
+
+      // 4. 插件业务 API 路由
+      const handler = routes[pathname]
+      if (handler) {
+        if (setCookieHdr) res.setHeader('set-cookie', setCookieHdr)
+        const r = handler(req, res)
+        if (r && typeof r.catch === 'function') r.catch((e) => { if (!res.writableEnded) sendJson(res, 200, { ok: false, message: String((e && e.message) || e) }) })
+        return
+      }
+
+      // 5. 根路径及前端页面直出独立 Web HTML 壳
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }
+        if (setCookieHdr) headers['set-cookie'] = setCookieHdr
+        res.writeHead(200, headers)
+        res.end(req.method === 'HEAD' ? undefined : buildStandaloneHtml())
+        return
+      }
+
+      res.writeHead(404, JSON_HEADERS_OK)
+      res.end(JSON.stringify({ ok: false, message: 'NOT_FOUND' }))
+    } catch (e) {
+      if (!res.writableEnded) sendJson(res, 500, { ok: false, message: String((e && e.message) || e) })
+    }
+  })
+
+  try {
+    await new Promise((resolveP, rejectP) => {
+      const onErr = (err) => { srv.removeListener('listening', onListen); rejectP(err) }
+      const onListen = () => { srv.removeListener('error', onErr); resolveP() }
+      srv.once('error', onErr)
+      srv.once('listening', onListen)
+      srv.listen(port, '0.0.0.0')
+    })
+  } catch (e) {
+    try { srv.close() } catch { /* ignore */ }
+    return { ok: false, code: e && e.code, message: String((e && e.message) || e) }
+  }
+
+  const actualPort = (srv.address() && typeof srv.address() === 'object' ? srv.address().port : port) || port
+  const lanUrl = `http://${curIp}:${actualPort}`
+  const grantUrl = `${lanUrl}/?token=${token}`
+  const startedAt = new Date().toISOString().replace('T', ' ').slice(0, 19)
+  inProcLan = { server: srv, port: actualPort, token, ip: curIp, lanUrl, grantUrl, startedAt }
+  writeLanGrantJson(inProcLan)
+  ensureWindowsFirewall()
+  return { ok: true, info: inProcLan }
+}
+
+async function stopInProcLanServer() {
+  if (!inProcLan || !inProcLan.server) return false
+  const srv = inProcLan.server
+  inProcLan = null
+  removeLanGrantJsonIfSelf()
+  await new Promise((resolveP) => {
+    try {
+      srv.close(() => resolveP())
+      if (typeof srv.closeAllConnections === 'function') srv.closeAllConnections()
+    } catch { resolveP() }
+  })
+  return true
+}
 function detectHostTz() {
   try { return String(Intl.DateTimeFormat().resolvedOptions().timeZone || '') } catch { return '' }
 }
@@ -492,11 +719,18 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
     const bind = detectLanBindable(req)
     const lanUrl = detectLanBase(req)
-    // 局域网实例自动探测（多端 2026-11-22）：局域网侧自证并带 grantUrl（启动脚本落盘的授权文件 pid 吻合才可信）；
-    // 回环侧（桌面 App）实探授权文件指向的实例，探通才报 alive——绝不凭文件存在就给出打不开的地址。
+    // 局域网实例自动探测（多端 2026-11-23 升级进程内独立 HTTP 服务）：
+    // ① 优先识别本进程内已启动的 node:http 独立局域网实例（inProcLan），零外部依赖、单进程同 SQLite 库；
+    // ② 其次局域网侧自证并带 grantUrl（启动脚本落盘的授权文件 pid 吻合或就是 inProcLan）；
+    // ③ 回环侧（桌面 App）实探授权文件指向的外部实例，探通才报 alive——绝不凭文件存在就给出打不开的地址。
     let lanInstance = null
     const grant = readLanGrantFile()
-    if (bind.lanBindable) {
+    if (inProcLan && inProcLan.server && inProcLan.server.listening) {
+      const curIp = hostLanIp() || inProcLan.ip || '127.0.0.1'
+      const curUrl = `http://${curIp}:${inProcLan.port}`
+      // 安全门（v0.3.0）：仅回环或持有效 token/Cookie 的调用方可见 grantUrl，防匿名 /version 泄漏 token 绕过鉴权
+      lanInstance = { alive: true, url: curUrl, grantUrl: lanCallerTrusted(req) ? `${curUrl}/?token=${inProcLan.token}` : null, via: bind.lanBindable ? 'self' : 'inproc' }
+    } else if (bind.lanBindable) {
       lanInstance = { alive: true, url: lanUrl, grantUrl: grant && grant.pid === process.pid ? grant.grantUrl || null : null, via: 'self' }
     } else if (grant && await probeLanAlive(grant.lanUrl, prefix)) {
       lanInstance = { alive: true, url: grant.lanUrl, grantUrl: grant.grantUrl || null, via: 'probe' }
@@ -568,22 +802,43 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     }
   }
 
-  // /lan-start、/lan-stop：桌面 App（回环侧）一键启停局域网实例（多端 A v0.2.0）。
-  // 仅本机回环可调（手机侧/远程一律 403）；调用随插件发布的 scripts/personalLan.ps1：
-  // start 为 fire-and-forget（脚本自带幂等/防火墙/grant 落盘，最长轮询约 55s），stop 同步等待；结果由前端轮询 /version lanInstance.alive 判定。
+  // /lan-start、/lan-stop：桌面 App（回环侧）一键启停局域网实例（多端 A v0.2.0 → 2026-11-23 升级进程内独立 HTTP 服务）。
+  // 仅本机回环可调（手机侧/远程一律 403）；优先在当前插件 Node 进程内直接启动 node:http 独立局域网服务（0.0.0.0:3081），
+  // 无需外部 Node.js 或 Harness 宿主目录，秒级启动且共用同一 SQLite 实例；若 3081 已被外部局域网实例占用，如实兼容。
   routes[`${prefix}/lan-start`] = async (req, res) => {
     if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
     if (!isLoopbackReq(req)) { sendJson(res, 403, { ok: false, message: '仅允许在本机桌面 App 内操作' }); return }
-    const script = lanScriptPath()
-    if (!script) { sendJson(res, 200, { ok: false, message: '未找到局域网启动脚本 scripts/personalLan.ps1' }); return }
     if (lanCtlBusy) { sendJson(res, 200, { ok: false, busy: true, message: '局域网实例正在启动中，请稍候' }); return }
     lanCtlBusy = true
-    setTimeout(() => { lanCtlBusy = false }, 75000)
+    const unlockTimer = setTimeout(() => { lanCtlBusy = false }, 5000)
+    if (typeof unlockTimer.unref === 'function') unlockTimer.unref()
     try {
-      const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'start'], { detached: true, stdio: 'ignore', windowsHide: true })
-      child.unref()
-      sendJson(res, 200, { ok: true, started: true, message: '正在启动局域网实例，请稍候…' })
+      const r = await startInProcLanServer(routes, prefix, DEFAULT_LAN_PORT)
+      if (r.ok) {
+        sendJson(res, 200, {
+          ok: true,
+          started: true,
+          mode: 'inproc',
+          lanUrl: r.info.lanUrl,
+          grantUrl: r.info.grantUrl,
+          message: '局域网实例已启动，可扫码访问',
+        })
+        return
+      }
+      // 若端口已被先前跑起的外部局域网实例占用且探活通过，直接视为已启动
+      if (r.code === 'EADDRINUSE') {
+        const curIp = hostLanIp() || '127.0.0.1'
+        const extUrl = `http://${curIp}:${DEFAULT_LAN_PORT}`
+        if (await probeLanAlive(extUrl, prefix)) {
+          sendJson(res, 200, { ok: true, started: true, mode: 'external', lanUrl: extUrl, message: '局域网实例已在运行中' })
+          return
+        }
+      }
+      clearTimeout(unlockTimer)
+      lanCtlBusy = false
+      sendJson(res, 200, { ok: false, message: `局域网服务启动失败（端口 ${DEFAULT_LAN_PORT}）：${r.message}` })
     } catch (e) {
+      clearTimeout(unlockTimer)
       lanCtlBusy = false
       sendJson(res, 200, { ok: false, message: '启动失败：' + String((e && e.message) || e) })
     }
@@ -592,9 +847,16 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
   routes[`${prefix}/lan-stop`] = async (req, res) => {
     if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
     if (!isLoopbackReq(req)) { sendJson(res, 403, { ok: false, message: '仅允许在本机桌面 App 内操作' }); return }
-    const script = lanScriptPath()
-    if (!script) { sendJson(res, 200, { ok: false, message: '未找到局域网启动脚本 scripts/personalLan.ps1' }); return }
+    lanCtlBusy = false
     try {
+      const stoppedInProc = await stopInProcLanServer()
+      if (stoppedInProc) {
+        sendJson(res, 200, { ok: true, output: 'STOPPED (in-process)' })
+        return
+      }
+      // 兼容停止旧版由 personalLan.ps1 拉起的外部实例
+      const script = lanScriptPath()
+      if (!script) { sendJson(res, 200, { ok: true, output: 'NOT-RUNNING' }); return }
       const out = await new Promise((resolveP) => {
         execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'stop'], { windowsHide: true, timeout: 20000 }, (err, stdout) => resolveP(String(stdout || (err && err.message) || '')))
       })
@@ -1041,6 +1303,9 @@ export function apply(ctx, config = {}) {
       )
     }
   })
-  ctx.effect(() => () => adapter.close())
+  ctx.effect(() => () => {
+    void stopInProcLanServer()
+    adapter.close()
+  })
   return { adapter, routes, runtime }
 }
