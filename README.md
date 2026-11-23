@@ -1,4 +1,4 @@
-# M10 AI 模具（DeepSeek Harness 插件）
+# DSH AI 模具（DeepSeek Harness 插件）
 
 单文件本地版模具管理：数据落在本机 SQLite，**零外部依赖**（无需 SQL Server、无需外部网关），断网可用。
 
