@@ -44,10 +44,12 @@ async function hotReloadSelf() {
 // 自动更新（2026-11-22）：发布仓 raw package.json 为权威最新版；进程级 10 分钟缓存，失败不缓存。
 const UPDATE_REPO_URL = 'https://github.com/zjj869849885/m10-mold-personal.git'
 // 国内网络对 raw.githubusercontent 不通很常见（本机 2026-11-22 实测超时），按候选顺序降级探测并记住通的那条。
+// v0.2.3 顺序修正：jsdelivr 分支名 @master 有边缘缓存 TTL 会返回旧版本（实测 GitHub 抖动期把「最新版本」
+// 钉在旧缓存上），故降级链只排权威新鲜源（api.github、raw.githubusercontent），@master 仅垫底兜网络不通。
 const UPDATE_RAW_URLS = [
   'https://api.github.com/repos/zjj869849885/m10-mold-personal/contents/package.json',
-  'https://cdn.jsdelivr.net/gh/zjj869849885/m10-mold-personal@master/package.json',
   'https://raw.githubusercontent.com/zjj869849885/m10-mold-personal/master/package.json',
+  'https://cdn.jsdelivr.net/gh/zjj869849885/m10-mold-personal@master/package.json',
 ]
 let updateGoodUrl = null
 const API_GITHUB_PKG_URL = UPDATE_RAW_URLS[0]
@@ -80,12 +82,53 @@ const UPDATE_META = new Set(['.gitignore', '.gitattributes'])
 /** 解析发布仓 master 最新 commit SHA：api.github 权威（内容随 SHA 不可变，杜绝 jsdelivr @master 边缘缓存返回旧文件）。 */
 async function resolveRemoteSha() {
   const u = `https://api.github.com/repos/${UPDATE_OWNER_REPO}/commits/master`
-  const r = await fetch(u, { signal: AbortSignal.timeout(8000), headers: { 'cache-control': 'no-cache', 'user-agent': 'm10-update', accept: 'application/vnd.github+json' } })
-  if (!r.ok) throw new Error('resolve sha HTTP ' + r.status)
-  const j = await r.json()
-  const sha = String(j.sha || '')
-  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error('resolve sha invalid')
-  return sha
+  let lastErr = null
+  try {
+    const r = await fetch(u, { signal: AbortSignal.timeout(8000), headers: { 'cache-control': 'no-cache', 'user-agent': 'm10-update', accept: 'application/vnd.github+json' } })
+    if (!r.ok) throw new Error('resolve sha HTTP ' + r.status)
+    const j = await r.json()
+    const sha = String(j.sha || '')
+    if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error('resolve sha invalid')
+    return sha
+  } catch (e) { lastErr = e }
+  // v0.2.3 限流降级：匿名 api.github 配额打爆（403 rate limit）时走 git 协议 ls-remote——直连 origin 实时解析，
+  // 不受 REST 配额与 CDN 缓存影响，SHA 权威；本机无 git 环境再落 jsdelivr 清单接口，全败如实上抛。
+  try {
+    const sha = await resolveRemoteShaViaLsRemote()
+    if (sha) return sha
+  } catch (e) { lastErr = e }
+  // v0.2.3 第三降级：jsdelivr 清单接口拿最新 release tag（semver 取大），再经 @tag 解析重定向取不可变 SHA。
+  try {
+    const ju = `https://data.jsdelivr.com/v1/packages/gh/${UPDATE_OWNER_REPO}?structure=flat`
+    const jr = await fetch(ju, { signal: AbortSignal.timeout(8000), headers: { 'cache-control': 'no-cache' } })
+    if (jr.ok) {
+      const jj = await jr.json()
+      const tags = (jj.versions || []).map((v) => String(v && v.version || '')).filter((t) => /^\d+\.\d+\.\d+$/.test(t))
+      tags.sort((a, b) => (semverLt(a, b) ? 1 : -1))
+      if (tags.length) {
+        const cdn = await fetch(`https://cdn.jsdelivr.net/gh/${UPDATE_OWNER_REPO}@${tags[0]}/package.json`, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(8000) })
+        const rm = String(cdn.url || '').match(/@([0-9a-f]{40})\//)
+        if (rm) return rm[1]
+      }
+    }
+  } catch (e) { lastErr = e }
+  throw lastErr || new Error('resolve sha all sources failed')
+}
+function resolveRemoteShaViaLsRemote() {
+  return new Promise((res, rej) => {
+    let gitExe = 'git'
+    try { if (process.platform === 'win32') gitExe = process.env.M10_GIT_EXE || 'git' } catch { }
+    const p = spawn(gitExe, ['ls-remote', UPDATE_REPO_URL, 'refs/heads/master'], { windowsHide: true })
+    let out = ''
+    const t = setTimeout(() => { try { p.kill() } catch { } rej(new Error('ls-remote timeout')) }, 12000)
+    p.stdout.on('data', (d) => { out += String(d) })
+    p.on('error', (e) => { clearTimeout(t); rej(e) })
+    p.on('close', () => {
+      clearTimeout(t)
+      const m = out.match(/^([0-9a-f]{40})\s+refs\/heads\/master/m)
+      if (m) res(m[1]); else rej(new Error('ls-remote no master ref'))
+    })
+  })
 }
 /** 发布仓文件清单（按 SHA）：api.github git trees 权威，jsdelivr flat 降级。返回相对路径数组（无前导斜杠）。 */
 async function fetchRemoteFileList(sha) {
