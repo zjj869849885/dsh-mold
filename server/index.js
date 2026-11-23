@@ -533,7 +533,7 @@ function buildStandaloneHtml() {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <title>AI模具管理（个人版）</title>
+  <title>AI模具管理</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <style>
     html, body, #m10-standalone-root {

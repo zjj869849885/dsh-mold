@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "AI Mold Manager (Personal)",
+    "title": "AI Mold Manager",
     "description": "AI mold management, personal offline edition: a self-contained local data layer on node:sqlite with zero external/gateway dependencies. DP list pages rendered natively inside the design-token system; routes served under /m10-mold-personal/api/*."
   }
 }

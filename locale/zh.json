@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "AI模具管理（个人版）",
+    "title": "AI模具管理",
     "description": "在左侧栏添加 AI 模具管理入口（个人版）：本地离线 node:sqlite 数据层，零外部依赖、零网关；用组件库在设计稿 token 体系内原生呈现模具档案等 DP 列表页；服务端路由挂载于 /m10-mold-personal/api/*。"
   }
 }
