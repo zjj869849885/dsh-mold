@@ -693,6 +693,21 @@ function sendJson(res, status, obj) {
   res.end(body)
 }
 
+/** 自定义 Logo 辅助：查找 dataDir 下的 custom-logo.* 文件（返回绝对路径或 null）。 */
+function _findLogoFile(dataDir) {
+  for (const ext of ['png', 'jpg', 'webp', 'svg']) {
+    const p = join(dataDir, `custom-logo.${ext}`)
+    if (existsSync(p)) return p
+  }
+  return null
+}
+/** 清除 dataDir 下所有 custom-logo.* 文件。 */
+function _removeLogoFiles(dataDir) {
+  for (const ext of ['png', 'jpg', 'webp', 'svg']) {
+    try { rmSync(join(dataDir, `custom-logo.${ext}`), { force: true }) } catch { /* ignore */ }
+  }
+}
+
 /** 与企业版同口径的 JSON body 读取（上限 + 解析失败回 400 并返回 null）。 */
 function readJsonBody(req, res, maxSize, cb) {
   let size = 0
@@ -907,6 +922,46 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     } catch (e) {
       sendJson(res, 200, { ok: false, message: '停止失败：' + String((e && e.message) || e) })
     }
+  }
+
+  // ---------- 自定义 Logo（v0.2.5 设置页客户可自行更换侧栏图标） ----------
+  // GET /logo：存在自定义 logo 时直出图片二进制，否则 JSON 告知无自定义。
+  routes[`${prefix}/logo`] = (req, res) => {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      const logoFile = _findLogoFile(adapter.dataDir)
+      if (logoFile) {
+        const buf = readFileSync(logoFile)
+        const mime = mimeOf(buf) || 'image/png'
+        res.writeHead(200, { 'content-type': mime, 'cache-control': 'no-cache', 'content-length': buf.length })
+        res.end(req.method === 'HEAD' ? undefined : buf)
+      } else {
+        sendJson(res, 200, { ok: true, hasCustom: false })
+      }
+      return
+    }
+    if (req.method === 'POST') {
+      readJsonBody(req, res, 512 * 1024, (body) => {
+        const dataUrl = String(body.dataUrl || '')
+        const m = dataUrl.match(/^data:(image\/(?:png|jpeg|svg\+xml|webp));base64,(.+)$/)
+        if (!m) { sendJson(res, 200, { ok: false, message: '无效的图片数据（需 data:image/…;base64,… 格式）' }); return }
+        const mime = m[1]
+        const raw = Buffer.from(m[2], 'base64')
+        if (raw.length > 200 * 1024) { sendJson(res, 200, { ok: false, message: '图片文件过大，请控制在 200KB 以内' }); return }
+        // 清除旧 logo 文件
+        _removeLogoFiles(adapter.dataDir)
+        const ext = mime === 'image/svg+xml' ? 'svg' : mime === 'image/webp' ? 'webp' : mime === 'image/jpeg' ? 'jpg' : 'png'
+        const dest = join(adapter.dataDir, `custom-logo.${ext}`)
+        writeFileSync(dest, raw)
+        sendJson(res, 200, { ok: true, message: 'Logo 已更新' })
+      })
+      return
+    }
+    if (req.method === 'DELETE') {
+      _removeLogoFiles(adapter.dataDir)
+      sendJson(res, 200, { ok: true, message: '已恢复默认 Logo' })
+      return
+    }
+    res.writeHead(405, { allow: 'GET, HEAD, POST, DELETE' }); res.end()
   }
 
   routes[`${prefix}/pages`] = async (req, res) => {
