@@ -1,8 +1,18 @@
 {
   "name": "dsh-plugin-m10-mold-personal",
-  "version": "0.2.10",
-  "private": true,
+  "version": "0.2.11",
+  "private": false,
   "description": "AI模具管理·个人版：node:sqlite 本地库、零外部依赖、单人离线、局域网多端。",
+  "keywords": [
+    "dsh-mold",
+    "dsh-plugin",
+    "deepseek-harness",
+    "mold-management"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zjj869849885/dsh-mold.git"
+  },
   "type": "module",
   "exports": {
     ".": "./server/index.js",

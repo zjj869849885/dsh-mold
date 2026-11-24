@@ -57,45 +57,56 @@
 
 | 方式 | 适用 | 前提 |
 |---|---|---|
-| **A：插件页贴仓库地址** | 目标机能连 github.com | 私有仓需该机已有 Git 凭据（见下） |
-| **B：插件页填本地路径** | 内网机 / 离线交付 | 先把仓库放到本机某目录 |
-| **C：手改 profile** | 宿主是源码仓形态、或要批量部署 | 见最后一节 |
+| **A：npm 安装** | IDE 插件市场 / 命令行一键安装 | 已发布 npm 包，能访问 registry.npmjs.org |
+| **B：插件页贴 GitHub 地址** | 需要直接跟随仓库源码 | 目标机能连 github.com |
+| **C：插件页填本地路径** | 内网机 / 离线交付 | 先把仓库放到本机某目录 |
+| **D：手改 profile** | 宿主是源码仓形态、或要批量部署 | 见下文 |
 
-## 方式 A：Harness「插件」页直接贴地址（最省事）
+## 方式 A：npm 安装（IDE 插件市场推荐）
+
+在 Harness「插件市场」搜索 `dsh-mold` 或完整包名 `dsh-plugin-m10-mold-personal`，点击安装；也可以执行：
+
+```powershell
+dsh plugin --profile web add dsh-plugin-m10-mold-personal
+```
+
+`web` 换成本机实际使用的 profile 名；浏览器版通常是 `web`，桌面版通常是 `desktop` 或 `desktop-NNN`。安装后按提示重启实例，侧栏出现「AI模具管理」面板。
+
+## 方式 B：Harness「插件」页直接贴 GitHub 地址
 
 1. 打开 Harness →「插件」→「添加插件」，安装源填：
 
    ```
-   https://github.com/<你的账号>/m10-mold-personal.git
+   https://github.com/zjj869849885/dsh-mold.git
    ```
 
-   等价写法：`github:<你的账号>/m10-mold-personal`。要锁版本就在末尾加 `#` 和 tag / 分支 / commit：
+   等价写法：`github:zjj869849885/dsh-mold`。要锁版本就在末尾加 `#` 和 tag / 分支 / commit：
 
    ```
-   https://github.com/<你的账号>/m10-mold-personal.git#v0.1.2
+   https://github.com/zjj869849885/dsh-mold.git#v0.2.11
    ```
 
 2. 确认。宿主对 git 地址**不做包内容预检**，直接把整个仓库交给 pnpm；pnpm 读的是**仓库根的 `package.json`**——这正是本仓摊平成「根即插件包」的原因。
 3. 装完宿主会自己校验 `dsh.bundle` 声明、加载 `cordis.patch.yml`、把包名写进当前 profile 的 `bundles` 并启用，**不需要你手改任何配置文件**。
 4. 列表里若提示需重启，重启实例后侧栏出现「AI模具管理」面板，按「第一次上手」建组织即可。
 
-私有仓的鉴权口径（按宿主源码实测逻辑）：贴地址后宿主先跑一次 `git -c credential.helper= ls-remote` 探测——这个探测**故意禁用凭据助手**，所以对私有仓必然失败；但只有被判为「网络不通/超时」才会当场中止，鉴权类失败会放行给 pnpm，pnpm 再用该机正常的 Git 凭据去拉。所以：
+本仓为公开仓库，正常无需额外 GitHub 凭据。若安装失败，先验证网络与仓库可达：
 
-- 那台机器已经登录过 GitHub（Git Credential Manager 里有账号，或配了 SSH key）→ 直接就能装。
-- 装失败先在该机命令行验一句：`git ls-remote https://github.com/<你的账号>/m10-mold-personal.git`，要能出 hash。
-- 嫌麻烦就把仓库转 Public，或改走方式 B（离线 zip）。
-
-## 方式 B：插件页填本地路径
-
-「添加插件」里填**绝对路径**，指向上面的 clone/解压目录根即可（v0.1.2 起不再需要拼子目录名）：
-
-```
-D:/dsh-plugins/m10-mold-personal
+```powershell
+git ls-remote https://github.com/zjj869849885/dsh-mold.git
 ```
 
-宿主对本地路径会真检查：该目录必须有 `package.json` 且声明 `dsh.bundle`，否则回一句 `declares no dsh.bundle` 拒掉——摊平后根上就是插件包，能过。相对路径不接受。后续动作与方式 A 的第 3、4 步相同。
+## 方式 C：插件页填本地路径
 
-## 方式 C：安装：接到你手上的 Harness（手动配 profile）
+「添加插件」里填**绝对路径**，指向 clone/解压目录根即可：
+
+```
+D:/dsh-plugins/dsh-mold
+```
+
+宿主对本地路径会真检查：该目录必须有 `package.json` 且声明 `dsh.bundle`，否则回一句 `declares no dsh.bundle` 拒掉——摊平后根上就是插件包，能过。相对路径不接受。后续动作与方式 B 的第 3、4 步相同。
+
+## 方式 D：安装：接到你手上的 Harness（手动配 profile）
 
 1. 把本仓（摊平后的目录根）放到目标机的固定位置，例如 `D:/dsh-plugins/m10-mold-personal`（路径中不要带中文/空格更稳）。
 
@@ -145,9 +156,9 @@ D:/dsh-plugins/m10-mold-personal
 - `cordis.patch.yml` 里的 `name` **必须是包名** `dsh-plugin-m10-mold-personal`，不能写成 `file:///` 路径——否则客户端 bundle 会被静默跳过，页面外壳起来了但插件不加载。
 - 改了 `cordis.patch.yml` 或 profile 的 `bundles`/`link:`，**必须重启实例**才生效；只改 `client.js` 磁盘产物则浏览器硬刷新即可。
 
-## 方式 C 补充：从零在新机上手（详细版）
+## 方式 D 补充：从零在新机上手（详细版）
 
-> 能连外网的机器直接走上面「方式 A」，本节 1~4 步全部跳过（宿主自己完成）；本节主要给不能装凭据、需要手动配 profile 的场景。
+> 能连外网的机器直接走上面的「方式 A」或「方式 B」，本节 1~4 步全部跳过（宿主自己完成）；本节主要给不能装凭据、需要手动配 profile 的场景。
 
 前提只三条：**目标机已装 Harness** ＋ **Node ≥ 22.13** ＋ **能读到本仓**。插件本体零依赖，不需要 npm 下载任何东西。
 
@@ -156,7 +167,7 @@ D:/dsh-plugins/m10-mold-personal
 1. **取包**（二选一）
 
    ```powershell
-   git clone https://github.com/<你的账号>/m10-mold-personal.git   # 本仓是 Private，需先把对方加为 Collaborator
+   git clone https://github.com/zjj869849885/dsh-mold.git
    ```
 
    或者直接发压缩包：把仓库根目录（摊平后就是插件包本体）打 zip 传过去解压（包体零依赖，离线传输完全可行）。
@@ -165,7 +176,7 @@ D:/dsh-plugins/m10-mold-personal
 
 3. **建/改 profile**：路径 `%USERPROFILE%/.dsh/profiles/personal/package.json`（即 `C:/Users/<你>/.dsh/profiles/personal/package.json`）
 
-   - 该目录**不存在** → 新建同名目录，放入「方式 C」那份 `package.json` 即可（`--profile personal` 按目录名解析）。
+   - 该目录**不存在** → 新建同名目录，放入「方式 D」那份 `package.json` 即可（`--profile personal` 按目录名解析）。
    - 该目录**已有文件** → 只**追加**，别整份覆盖：在 `dependencies` 里加一行 `link:`，在 `dsh.profile.bundles` 数组末尾加包名。
    - **`@local/dsh-scratchpad` 可以不写**：那是宿主的草稿本 bundle，与模具插件无关。没有对应目录就别加，加了反而 install 失败。
    - `link:` 必须改成**第 2 步在那台机器上的真实路径**，且用正斜杠，如 `link:D:/dsh-plugins/m10-mold-personal`（JSON 里反斜杠要转义，正斜杠最稳）。
