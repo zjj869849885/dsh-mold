@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { spawn, execFile } from 'node:child_process'
+import { spawn, execFile, execFileSync } from 'node:child_process'
 import { PersonalSqliteAdapter, mimeOf } from './sqlite/adapter.js'
 import { resolveDataDir } from './sqlite/db.js'
 import { buildBillInit, buildDataHead, NUMERIC_METAKEYS } from './sqlite/personal.schema.js'
@@ -347,19 +347,21 @@ const JSON_HEADERS_OK = { 'content-type': 'application/json; charset=utf-8', 'ca
 
 /**
  * b8 二维码标签「扫码直达」基址（设计稿 §6 坑 1：绝不把 localhost/127.0.0.1/0.0.0.0 编进二维码）。
- * 优先取请求 Host（本机经局域网 IP 打开时即该 IP:port），命中回环/通配地址则回退探测首个非内部 IPv4。
+ * 优先取请求 Host；命中回环/通配地址时使用默认路由优选后的 hostLanIp，避免 VPN 虚拟网卡假地址。
  */
-function detectLanBase(req) {
+function detectLanBase(req, forceIp = false) {
   const hostHdr = String((req.headers && req.headers.host) || '')
   const sep = hostHdr.lastIndexOf(':')
   const h = sep > 0 ? hostHdr.slice(0, sep) : hostHdr
   const port = sep > 0 ? hostHdr.slice(sep) : ''
   const isLoopback = !h || h === 'localhost' || h.startsWith('127.') || h === '0.0.0.0' || h === '[::1]' || h === '::1'
   if (!isLoopback) return 'http://' + hostHdr
+  const ip = hostLanIp(forceIp)
+  if (ip) return 'http://' + ip + port
   const ifaces = os.networkInterfaces()
   for (const k of Object.keys(ifaces)) {
     for (const a of ifaces[k] || []) {
-      if ((a.family === 'IPv4' || a.family === 4) && !a.internal) return 'http://' + a.address + port
+      if ((a.family === 'IPv4' || a.family === 4) && !a.internal && usableLanIp(String(a.address))) return 'http://' + a.address + port
     }
   }
   return 'http://' + (hostHdr || '127.0.0.1')
@@ -428,22 +430,59 @@ async function probeLanAlive(baseUrl, apiPrefix) {
  * 主机 IANA 时区（阶段 5 多时区显示层锚点）：库内 datetime 是主机本地墙钟（jsonNorm 用 UTC 取值器输出无偏移 yyyy-MM-dd HH:mm:ss），
  * 前端需知道这堵墙钟属于哪个时区才能正确换算到浏览设备时区。取运行本插件的 Node 进程 OS 时区，纯新增、异常回空串。
  */
-/** 本机真实局域网 IPv4（多端 IP 显示/漂移）：Node 枚举顺序会把代理/VPN 的 TUN 网卡（如 Mihomo/Clash 的
- * 198.18/198.19 基准段）排在真局域网之前，故先剔除链路本地与代理基准段，再优先私有网段（192.168/10/172.16-31）。 */
-function hostLanIp() {
+/** 本机真实局域网 IPv4（多端 IP 显示/漂移）：Windows 默认路由接口优先，192.168 网段次之，
+ * 避免 VPN/TUN 虚拟网卡使用私有网段地址时抢在真实 WiFi 前被枚举选中。 */
+const HOST_LAN_IP_TTL = 5000
+let hostLanIpCache = { at: 0, ip: '' }
+
+function usableLanIp(ip) {
+  return !!ip && ip !== '0.0.0.0' && ip !== '255.255.255.255' && !ip.startsWith('127.') &&
+    !ip.startsWith('169.254.') && !/^198\.(18|19)\./.test(ip) && !/^(22[4-9]|23\d)\./.test(ip)
+}
+function lanIpRank(ip) {
+  if (ip.startsWith('192.168.')) return 0
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 1
+  if (ip.startsWith('10.')) return 2
+  return 3
+}
+/** 纯函数：默认路由地址排在候选前，同档位稳定保持枚举顺序；192.168 > 172 > 10 > 其他。 */
+export function pickLanIp(candidates = [], preferred = []) {
+  const clean = (arr) => Array.from(new Set((arr || []).map((x) => String(x || '').trim()).filter(usableLanIp)))
+  const pool = clean([...(preferred || []), ...(candidates || [])])
+  pool.sort((a, b) => lanIpRank(a) - lanIpRank(b))
+  return pool[0] || ''
+}
+/** Windows 默认路由（0.0.0.0/0）按 metric 排序后取接口 IPv4；失败由 hostLanIp 回退系统枚举。 */
+function defaultRouteLanIps() {
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    "$routes=Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric",
+    "foreach($r in $routes){$a=Get-NetIPAddress -InterfaceIndex $r.ifIndex -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1; if($a){$a.IPAddress}}",
+  ].join(';')
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8', timeout: 1500, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  return String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+}
+function hostLanIp(force = false) {
+  const now = Date.now()
+  if (!force && hostLanIpCache.ip && now - hostLanIpCache.at < HOST_LAN_IP_TTL) return hostLanIpCache.ip
+  const candidates = []
   try {
     const ifaces = os.networkInterfaces()
-    const cands = []
     for (const k of Object.keys(ifaces)) {
       for (const a of ifaces[k] || []) {
-        if ((a.family === 'IPv4' || a.family === 4) && !a.internal) cands.push(String(a.address))
+        if ((a.family === 'IPv4' || a.family === 4) && !a.internal) candidates.push(String(a.address))
       }
     }
-    const usable = cands.filter((ip) => !ip.startsWith('169.254.') && !/^198\.(18|19)\./.test(ip))
-    const isPrivate = (ip) => /^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
-    return usable.find(isPrivate) || usable[0] || ''
   } catch { /* ignore */ }
-  return ''
+  let preferred = []
+  if (process.platform === 'win32') {
+    try { preferred = defaultRouteLanIps() } catch { /* 回退系统枚举 */ }
+  }
+  const ip = pickLanIp(candidates, preferred)
+  if (ip) hostLanIpCache = { at: now, ip }
+  return ip
 }
 /** 仅本机回环可调（多端一键启停 v0.2.0）：手机侧/远程请求一律拒绝，避免任意设备触发启停。 */
 function isLoopbackReq(req) {
@@ -775,8 +814,9 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
 
   routes[`${prefix}/version`] = async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
+    const refreshIp = /(?:^|[?&])refresh=1(?:&|$)/.test(String((req && req.url) || ''))
     const bind = detectLanBindable(req)
-    const lanUrl = detectLanBase(req)
+    const lanUrl = detectLanBase(req, refreshIp)
     // 局域网实例自动探测（多端 2026-11-23 升级进程内独立 HTTP 服务）：
     // ① 优先识别本进程内已启动的 node:http 独立局域网实例（inProcLan），零外部依赖、单进程同 SQLite 库；
     // ② 其次局域网侧自证并带 grantUrl（启动脚本落盘的授权文件 pid 吻合或就是 inProcLan）；
@@ -795,7 +835,7 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     }
     const body = JSON.stringify({
       ok: true, name: PKG.name, version: readPkgVersion(), runningVersion: String(PKG.version), hotReloadAvailable: !!hotReloadGetter, edition: EDITION, schemaVersion: adapter.schemaVersion,
-      lanUrl, hostTz: detectHostTz(), hostLanIp: hostLanIp(),
+      lanUrl, hostTz: detectHostTz(), hostLanIp: hostLanIp(refreshIp),
       lanBindable: bind.lanBindable, bindAddress: bind.bindAddress,
       lanInstance,
     })

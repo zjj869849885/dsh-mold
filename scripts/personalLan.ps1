@@ -20,10 +20,21 @@ $errLog = Join-Path $profDir 'lan-instance.err.log'
 function Find-LanIP {
   $all = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
     Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notmatch '^198\.(18|19)\.' -and $_.PrefixOrigin -ne 'WellKnown' }
-  $priv = $all | Where-Object { $_.IPAddress -match '^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)' } | Select-Object -First 1
-  if ($priv) { return $priv.IPAddress }
-  $first = $all | Select-Object -First 1
-  if ($first) { return $first.IPAddress }
+  $routeIps = @()
+  $routes = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric
+  foreach ($r in $routes) {
+    $a = Get-NetIPAddress -InterfaceIndex $r.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+      Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
+      Select-Object -First 1
+    if ($a) { $routeIps += $a.IPAddress }
+  }
+  $pool = @($routeIps + @($all | ForEach-Object { $_.IPAddress })) | Where-Object { $_ } | Select-Object -Unique
+  $wifi = $pool | Where-Object { $_ -match '^192\.168\.' } | Select-Object -First 1
+  if ($wifi) { return $wifi }
+  $priv = $pool | Where-Object { $_ -match '^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)' } | Select-Object -First 1
+  if ($priv) { return $priv }
+  $first = $pool | Select-Object -First 1
+  if ($first) { return $first }
   return ''
 }
 function Test-HostRoot($c) {
