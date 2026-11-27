@@ -45,6 +45,7 @@ export function migrate(db) {
   }
   ensureBillStateColumns(db)
   ensureCreatorColumns(db)
+  ensureSourceBillColumns(db)
   return getUserVersion(db)
 }
 
@@ -87,6 +88,14 @@ export function ensureCreatorColumns(db) {
   for (const table of new Set(tables)) {
     const cols = db.prepare('PRAGMA table_info(' + table + ')').all().map((c) => String(c.name))
     if (!cols.includes('FCreater')) db.prepare('alter table ' + table + ' add column FCreater TEXT DEFAULT ' + "''").run()
+  }
+}
+
+/** 补齐出库申请/领用/归还三单据来源单据号列（R8/R9/R10 下推可追溯 + 反审核引用拦截，幂等安全）。 */
+export function ensureSourceBillColumns(db) {
+  for (const table of ['T_MD_OutboundApply', 'T_MD_PickRecord', 'T_MD_ReturnRecord']) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => String(c.name))
+    if (!cols.includes('FSourceBillNo')) db.prepare(`alter table ${table} add column FSourceBillNo TEXT DEFAULT ''`).run()
   }
 }
 /** 打开（或首启创建）本地库：建目录树 → PRAGMA → 迁移。返回 { db, dataDir, dbPath }。 */

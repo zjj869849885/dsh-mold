@@ -279,18 +279,175 @@ export class PersonalSqliteAdapter {
   }
 
   updateBillStatusCol(strFunc, id, value, auditor = '') {
-    const col = auditableColOf(strFunc)
-    const table = String(strFunc) === '203101' ? 'T_MD_Mould' : PAGE_DEFS[String(strFunc)].table
+    const sf = String(strFunc)
+    const col = auditableColOf(sf)
+    const table = sf === '203101' ? 'T_MD_Mould' : PAGE_DEFS[sf].table
     // 审核人/审核日期回写（缺陷修复 2026-11-21）：审核铸入操作人 + 本地时间，反审核清空；此前仅改状态列致「其他」块恒空。
     const auditing = String(value) === '1'
     const auditSet = auditing ? `, FApproverID = ?, FApproverDate = datetime('now','localtime')` : `, FApproverID = '', FApproverDate = ''`
     const sql = `update ${table} set ${col} = ?${auditSet}, FModifyTime = datetime('now','localtime') where FInterID = ? and deleted_at is null`
-    const r = auditing
-      ? this.db.prepare(sql).run(Number(value), String(auditor || ''), Number(id))
-      : this.db.prepare(sql).run(Number(value), Number(id))
-    // 文案口径收口（2026-11-21 复核）：本轮已把审核/删除各分支统一为「不露内码 + 给刷新引导」，
-    // 此处是最后一条仍吐 `单据 N` 的残留分支（预检与写库之间行被并发删除时命中），同口径改写。
-    if (r.changes === 0) throw new Error('所选单据已不存在或已被删除，请刷新列表后重试')
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const before = this.db.prepare(`select * from ${table} where FInterID = ? and deleted_at is null`).get(Number(id))
+      if (!before) throw new Error('所选单据已不存在或已被删除，请刷新列表后重试')
+      const r = auditing
+        ? this.db.prepare(sql).run(Number(value), String(auditor || ''), Number(id))
+        : this.db.prepare(sql).run(Number(value), Number(id))
+      if (r.changes === 0) throw new Error('所选单据已不存在或已被删除，请刷新列表后重试')
+      this.applyBillAuditWriteBack(sf, before, auditing)
+      this.db.exec('COMMIT')
+    } catch (e) {
+      try { this.db.exec('ROLLBACK') } catch { /* 已回滚忽略 */ }
+      throw e
+    }
+  }
+
+  /**
+   * 单据审核/反审核业务反写（同事务原子执行）：
+   * 覆盖 203149 使用汇报→模次/日志、203153/203146 状态/报废→模具状态、
+   * 203142/203143 领用/归还→库存状态、203116/203126/203133→维护日志/保养周期/报修闭环。
+   */
+  applyBillAuditWriteBack(strFunc, row, auditing) {
+    if (!row) return
+    const today = new Date().toISOString().slice(0, 10)
+    const statusMap = { 生产: '生产中', 维修: '维修中', 保养: '保养中' }
+    const mapStatus = (s) => statusMap[String(s || '')] || String(s || '')
+    const findMold = (code) => {
+      const c = String(code || '').trim()
+      return c ? this.db.prepare('select FInterID, FMDStatus, used_shots from T_MD_Mould where FMDNumber = ? and deleted_at is null').get(c) : null
+    }
+
+    if (strFunc === '203149') {
+      const m = findMold(row.FMouldNumber)
+      const delta = Number(row.FRptUseNum) || 0
+      const tag = `使用汇报单:${String(row.FBillNo || row.FInterID)}`
+      if (!m || delta <= 0) return
+      if (auditing) {
+        this.db.prepare('insert into usage_log(mold_id, log_date, delta_shots, machine_no, remark) values (?,?,?,?,?)')
+          .run(Number(m.FInterID), today, delta, '', tag)
+        this.db.prepare("update T_MD_Mould set used_shots = used_shots + ?, FModifyTime = datetime('now','localtime') where FInterID = ?")
+          .run(delta, Number(m.FInterID))
+      } else {
+        this.db.prepare('delete from usage_log where mold_id = ? and remark = ?').run(Number(m.FInterID), tag)
+        this.db.prepare("update T_MD_Mould set used_shots = max(0, used_shots - ?), FModifyTime = datetime('now','localtime') where FInterID = ?")
+          .run(delta, Number(m.FInterID))
+      }
+      return
+    }
+
+    if (strFunc === '203153') {
+      const m = findMold(row.FMouldNumber)
+      if (!m) return
+      if (auditing) {
+        const nextSt = mapStatus(row.FUpdateMDStatus)
+        if (!nextSt) return
+        if (!row.FMDStatus) {
+          this.db.prepare('update T_MD_StatusChange set FMDStatus = ? where FInterID = ?').run(String(m.FMDStatus || ''), Number(row.FInterID))
+        }
+        const chgDate = String(row.FReceiverDate || '').trim() || today
+        this.db.prepare("update T_MD_Mould set FMDStatus = ?, FMDChargeDate = ?, FModifyTime = datetime('now','localtime') where FInterID = ?")
+          .run(nextSt, chgDate, Number(m.FInterID))
+      } else if (row.FMDStatus) {
+        this.db.prepare("update T_MD_Mould set FMDStatus = ?, FModifyTime = datetime('now','localtime') where FInterID = ?")
+          .run(mapStatus(row.FMDStatus), Number(m.FInterID))
+      }
+      return
+    }
+
+    if (strFunc === '203146') {
+      const m = findMold(row.FMouldNumber)
+      if (!m) return
+      if (auditing) {
+        const scrapDate = String(row.FApplyTime || '').trim() || today
+        this.db.prepare("update T_MD_Mould set FMDStatus = '报废', FScrapDate = ?, FModifyTime = datetime('now','localtime') where FInterID = ?")
+          .run(scrapDate, Number(m.FInterID))
+      } else if (m.FMDStatus === '报废') {
+        this.db.prepare("update T_MD_Mould set FMDStatus = '在库', FModifyTime = datetime('now','localtime') where FInterID = ?")
+          .run(Number(m.FInterID))
+      }
+      return
+    }
+
+    if (strFunc === '203142' || strFunc === '203143') {
+      const entryTbl = strFunc === '203142' ? 'T_MD_PickRecordEntry' : 'T_MD_ReturnRecordEntry'
+      const molds = this.db.prepare(`select distinct FMouldNumber from ${entryTbl} where FInterID = ? and FMouldNumber <> ''`).all(Number(row.FInterID))
+      const stockSt = auditing ? (strFunc === '203142' ? '出库' : '在库') : (strFunc === '203142' ? '在库' : '出库')
+      for (const r of molds) {
+        this.db.prepare("update T_MD_Mould set FMDStockStatus = ?, FModifyTime = datetime('now','localtime') where FMDNumber = ? and deleted_at is null")
+          .run(stockSt, String(r.FMouldNumber))
+      }
+      return
+    }
+
+    if (strFunc === '203116' || strFunc === '203126') {
+      const m = findMold(row.FMouldNumber)
+      if (!m) return
+      const isMaint = strFunc === '203126'
+      const logType = isMaint ? '保养' : '点检'
+      const tag = `${logType}记录:${String(row.FBillNo || row.FInterID)}`
+      if (auditing) {
+        const dt = String((isMaint ? (row.FMainEndTime || row.FMainStartTime) : (row.FChkEndTime || row.FChkStartTime)) || '').trim() || today
+        const op = String(row.FOperatEmp || row.FHandler || '').trim()
+        const shots = Number(m.used_shots) || 0
+        this.db.prepare('insert into maintenance_log(mold_id, log_type, log_date, items_json, result, cost, shots_at_log, operator, remark, image_ids_json) values (?,?,?,?,?,?,?,?,?,?)')
+          .run(Number(m.FInterID), logType, dt, '[]', isMaint ? '已保养' : '已点检', 0, shots, op, tag, '[]')
+        if (isMaint) {
+          this.db.prepare("update T_MD_Mould set last_maint_shots = ?, FModifyTime = datetime('now','localtime') where FInterID = ?")
+            .run(shots, Number(m.FInterID))
+        }
+      } else {
+        this.db.prepare('delete from maintenance_log where mold_id = ? and remark = ?').run(Number(m.FInterID), tag)
+        if (isMaint) {
+          const prev = this.db.prepare("select shots_at_log from maintenance_log where mold_id = ? and log_type = '保养' order by id desc limit 1").get(Number(m.FInterID))
+          this.db.prepare("update T_MD_Mould set last_maint_shots = ?, FModifyTime = datetime('now','localtime') where FInterID = ?")
+            .run(prev ? Number(prev.shots_at_log) || 0 : 0, Number(m.FInterID))
+        }
+      }
+      return
+    }
+
+    if (strFunc === '203131') {
+      const rb = String(row.FRepairBillNo || '').trim()
+      if (!rb) return
+      if (auditing) {
+        this.db.prepare("update T_MD_Repair set FStatus = '维修中', FHandler = coalesce(nullif(FHandler,''), ?), FModifyTime = datetime('now','localtime') where FBillNo = ? and deleted_at is null and FStatus = '待处理'")
+          .run(String(row.FReceiverEmp || ''), rb)
+      } else {
+        this.db.prepare("update T_MD_Repair set FStatus = '待处理', FModifyTime = datetime('now','localtime') where FBillNo = ? and deleted_at is null and FStatus = '维修中'")
+          .run(rb)
+      }
+      return
+    }
+
+    if (strFunc === '203133') {
+      const m = findMold(row.FMouldNumber)
+      const tag = `维修记录:${String(row.FBillNo || row.FInterID)}`
+      const srcTask = String(row.FSourceBillNo || '').trim()
+      const taskRow = srcTask ? this.db.prepare('select FRepairBillNo from T_MD_ServerTask where FBillNo = ? and deleted_at is null').get(srcTask) : null
+      const repairNo = taskRow ? String(taskRow.FRepairBillNo || '').trim() : ''
+      if (auditing) {
+        if (m) {
+          const dt = String(row.FCheckDate || row.FRepairDate || '').trim() || today
+          const op = String(row.FOperatEmp || row.FPrincipal || '').trim()
+          this.db.prepare('insert into maintenance_log(mold_id, log_type, log_date, items_json, result, cost, shots_at_log, operator, remark, image_ids_json) values (?,?,?,?,?,?,?,?,?,?)')
+            .run(Number(m.FInterID), '维修', dt, '[]', String(row.FResult || ''), Number(row.FCost) || 0, Number(m.used_shots) || 0, op, tag, '[]')
+        }
+        if (repairNo) {
+          const nextSt = row.FResult === '不合格' ? '维修中' : '已修复'
+          const finDate = String(row.FCheckDate || row.FRepairDate || '').trim()
+          const handler = String(row.FPrincipal || row.FOperatEmp || '').trim()
+          const cost = Number(row.FCost) || 0
+          this.db.prepare("update T_MD_Repair set FStatus = ?, FFinishDate = coalesce(nullif(?, ''), FFinishDate), FResult = coalesce(nullif(?, ''), FResult), cost = case when ? > 0 then ? else cost end, FHandler = coalesce(nullif(?, ''), FHandler), FModifyTime = datetime('now','localtime') where FBillNo = ? and deleted_at is null")
+            .run(nextSt, finDate, String(row.FResult || ''), cost, cost, handler, repairNo)
+        }
+      } else {
+        if (m) this.db.prepare('delete from maintenance_log where mold_id = ? and remark = ?').run(Number(m.FInterID), tag)
+        if (repairNo) {
+          this.db.prepare("update T_MD_Repair set FStatus = '维修中', FModifyTime = datetime('now','localtime') where FBillNo = ? and deleted_at is null and FStatus = '已修复'")
+            .run(repairNo)
+        }
+      }
+    }
   }
 
   /** 单据业务标识（提示文案专用）：优先单号，档案类回落编号列，全无回落「页名#内码」，自带「」便于定位行。 */
@@ -311,10 +468,13 @@ export class PersonalSqliteAdapter {
    *（旧文案「该单已被下游记录引用（T_MD_ServerTask）」对用户不可读，2026-11-20 需求改造）。
    */
   downstreamRefMsg(strFunc, row) {
-    const code = String(row?.FMDNumber ?? '')
+    const sf = String(strFunc)
+    const def = sf === '203101' ? null : PAGE_DEFS[sf]
+    const codeCol = sf === '203101' ? 'FMDNumber' : (def && def.codeCol) || ''
+    const code = codeCol ? String(row?.[codeCol] ?? '') : ''
     const billNo = String(row?.FBillNo ?? '')
     const hits = []
-    for (const ref of BILL_DOWNSTREAM_REFS[String(strFunc)] || []) {
+    for (const ref of BILL_DOWNSTREAM_REFS[sf] || []) {
       const v = ref.match === 'code' ? code : billNo
       if (v === '' || v == null) continue
       // entry 行表无软删列（delete-by-head 语义），只 join 头表排软删
@@ -605,7 +765,7 @@ export class PersonalSqliteAdapter {
     }
     // 模具带出源行（moldRef 字段→模具名称）：编号 + 名称（下拉值=FMDNumber，与 moldNumbers 同口径）
     // 模具带出源行同口径只取已审核模具（与 moldNumbers 下拉值域一致，避免下拉与带出两套值域分叉）。
-    const moldRows = this.db.prepare('select FMDNumber, FName from T_MD_Mould where deleted_at is null and FStatus = 1').all()
+    const moldRows = this.db.prepare('select FMDNumber, FName, used_shots, FMDStatus from T_MD_Mould where deleted_at is null and FStatus = 1').all()
     return { itemOptions, refValues, refRows, moldRows }
   }
 

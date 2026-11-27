@@ -38,21 +38,22 @@ export const PUSH_RULES = [
     FRuleID: 'R7', src: '203124', tgt: '203126', tgtName: '保养记录',
     headMap: { 模具编码: '模具编码', 保养方案编码: '保养方案编码', 来源任务单号: '单据编号' },
     bodyMap: { B1: { 保养项目类型: '保养项目类型', 保养项目编码: '保养项目编码', 保养项目: '保养项目', 保养要求: '保养要求', 保养结果: '保养结果', 备注: '备注' } },
+    bodyValueMap: { B1: { 保养结果: { 合格: '正常', 不合格: '异常' } } },
   },
   // —— 物料/业务链：生产申领 → 出库申请 → 领用记录 → 归还记录 ——
   {
     FRuleID: 'R8', src: '203140', tgt: '203141', tgtName: '出库申请单',
-    headMap: { 申请人: '领用人', 申请时间: '领用时间' },
+    headMap: { 申请人: '领用人', 申请时间: '领用时间', 来源单据号: '单据编号' },
     bodyMap: { B1: { 模具编码: '模具编码', 模具名称: '模具名称', 出库申请数量: '申领数量' } },
   },
   {
     FRuleID: 'R9', src: '203141', tgt: '203142', tgtName: '领用记录单',
-    headMap: { 领用人: '申请人', 领用时间: '申请时间' },
+    headMap: { 领用人: '申请人', 领用时间: '申请时间', 来源单据号: '单据编号' },
     bodyMap: { B1: { 模具编码: '模具编码', 模具名称: '模具名称', 实际领用数量: '出库申请数量' } },
   },
   {
     FRuleID: 'R10', src: '203142', tgt: '203143', tgtName: '归还记录单',
-    headMap: { 归还人: '领用人', 归还时间: '领用时间' },
+    headMap: { 归还人: '领用人', 归还时间: '领用时间', 来源单据号: '单据编号' },
     bodyMap: { B1: { 模具编码: '模具编码', 模具名称: '模具名称', 归还数量: '实际领用数量' } },
   },
 ]
@@ -107,7 +108,16 @@ export function buildPushNextRow(adapter, source) {
     const srcBodies = isMoldSrc ? {} : adapter.getPageBodies(rule.src, fid)
     for (const [tab, map] of Object.entries(rule.bodyMap)) {
       const srcRows = Array.isArray(srcBodies[tab]) ? srcBodies[tab] : []
-      next[tab] = srcRows.map((r) => pickByMap(r, map))
+      const vmap = (rule.bodyValueMap && rule.bodyValueMap[tab]) || null
+      next[tab] = srcRows.map((r) => {
+        const picked = pickByMap(r, map)
+        if (vmap) {
+          for (const [col, tbl] of Object.entries(vmap)) {
+            if (picked[col] != null && tbl[String(picked[col])] !== undefined) picked[col] = tbl[String(picked[col])]
+          }
+        }
+        return picked
+      })
     }
   }
   return next

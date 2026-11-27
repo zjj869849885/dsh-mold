@@ -44,7 +44,7 @@ export const REPORT_DEFS = {
     filters: dateMold('h.FCreateDate'),
     columns: [COL('记录单号'), COL('模具编码'), COL('模具名称'), COL('点检方案'), COL('点检开始时间'), COL('点检结束时间'), COL('执行时长'), COL('处理人'), CREATED],
     select: `select h.FBillNo as 记录单号, h.FMouldNumber as 模具编码, m.FName as 模具名称, h.FScheNumber as 点检方案,
-      h.FChkStartTime as 点检开始时间, h.FChkEndTime as 点检结束时间, h.FDuration as 执行时长, h.FHandler as 处理人, h.FCreateDate as 创建时间`,
+      h.FChkStartTime as 点检开始时间, h.FChkEndTime as 点检结束时间, h.FDuration as 执行时长, coalesce(nullif(h.FOperatEmp, ''), h.FHandler) as 处理人, h.FCreateDate as 创建时间`,
     from: `from T_MD_CheckRecord h left join T_MD_Mould m on m.FMDNumber = h.FMouldNumber and m.deleted_at is null where h.deleted_at is null`,
     order: 'order by h.FInterID desc',
   },
@@ -54,7 +54,7 @@ export const REPORT_DEFS = {
     filters: dateMold('h.FCreateDate'),
     columns: [COL('记录单号'), COL('模具编码'), COL('模具名称'), COL('保养方案'), COL('保养开始时间'), COL('保养结束时间'), COL('执行时长'), COL('处理人'), CREATED],
     select: `select h.FBillNo as 记录单号, h.FMouldNumber as 模具编码, m.FName as 模具名称, h.FScheNumber as 保养方案,
-      h.FMainStartTime as 保养开始时间, h.FMainEndTime as 保养结束时间, h.FDuration as 执行时长, h.FHandler as 处理人, h.FCreateDate as 创建时间`,
+      h.FMainStartTime as 保养开始时间, h.FMainEndTime as 保养结束时间, h.FDuration as 执行时长, coalesce(nullif(h.FOperatEmp, ''), h.FHandler) as 处理人, h.FCreateDate as 创建时间`,
     from: `from T_MD_MainRecord h left join T_MD_Mould m on m.FMDNumber = h.FMouldNumber and m.deleted_at is null where h.deleted_at is null`,
     order: 'order by h.FInterID desc',
   },
@@ -64,7 +64,7 @@ export const REPORT_DEFS = {
     filters: dateMold('h.FCreateDate'),
     columns: [COL('报修单号'), COL('模具编码'), COL('模具名称'), COL('故障描述'), COL('报修人'), COL('报修日期'), COL('处理状态'), COL('维修负责人'), COL('完成日期'), COL('处理结果'), COL('维修费用', { num: true }), CREATED],
     select: `select h.FBillNo as 报修单号, h.FMouldNumber as 模具编码, m.FName as 模具名称, h.FFaultDesc as 故障描述,
-      h.FReporter as 报修人, h.FRepairDate as 报修日期, h.FStatus as 处理状态, h.FHandler as 维修负责人,
+      coalesce(nullif(h.FRPTRepairerEmp, ''), h.FReporter) as 报修人, h.FRepairDate as 报修日期, h.FStatus as 处理状态, h.FHandler as 维修负责人,
       h.FFinishDate as 完成日期, h.FResult as 处理结果, h.cost as 维修费用, h.FCreateDate as 创建时间`,
     from: `from T_MD_Repair h left join T_MD_Mould m on m.FMDNumber = h.FMouldNumber and m.deleted_at is null where h.deleted_at is null`,
     order: 'order by h.FInterID desc',
@@ -160,7 +160,7 @@ export const REPORT_DEFS = {
       { FTABNumber: 'T2', FTABName: '维修记录', FGroupNumber: 'G1' },
     ],
     detail: {
-      T1: (row) => ({ sql: `select FBillNo as 报修单号, FFaultDesc as 故障描述, FReporter as 报修人, FRepairDate as 报修日期, FStatus as 处理状态, FHandler as 维修负责人, FFinishDate as 完成日期, cost as 维修费用
+      T1: (row) => ({ sql: `select FBillNo as 报修单号, FFaultDesc as 故障描述, coalesce(nullif(FRPTRepairerEmp, ''), FReporter) as 报修人, FRepairDate as 报修日期, FStatus as 处理状态, FHandler as 维修负责人, FFinishDate as 完成日期, cost as 维修费用
         from T_MD_Repair where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
       T2: (row) => ({ sql: `select FBillNo as 记录单号, FRepairContent as 维修内容, FPrincipal as 负责人, FRepairDate as 维修日期, FCheckDate as 验收日期, FResult as 维修结果, FCost as 维修费用
         from T_MD_Server where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
@@ -184,8 +184,8 @@ export const REPORT_DEFS = {
     build(f) {
       const { clause, params } = mkWhere(REPORT_DEFS.C012.filters, f)
       const inner = `
-        select FHandler as 人员, 1 as 点检, 0 as 保养, 0 as 维修 from T_MD_CheckRecord where deleted_at is null and FHandler <> ''
-        union all select FHandler, 0, 1, 0 from T_MD_MainRecord where deleted_at is null and FHandler <> ''
+        select coalesce(nullif(FOperatEmp, ''), FHandler) as 人员, 1 as 点检, 0 as 保养, 0 as 维修 from T_MD_CheckRecord where deleted_at is null and coalesce(nullif(FOperatEmp, ''), FHandler) <> ''
+        union all select coalesce(nullif(FOperatEmp, ''), FHandler), 0, 1, 0 from T_MD_MainRecord where deleted_at is null and coalesce(nullif(FOperatEmp, ''), FHandler) <> ''
         union all select FPrincipal, 0, 0, 1 from T_MD_Server where deleted_at is null and FPrincipal <> ''`
       return { sql: `select 人员, sum(点检) as 点检任务数, sum(保养) as 保养任务数, sum(维修) as 维修任务数, count(*) as 合计
         from (${inner}) t where 1=1${clause} group by 人员 order by 合计 desc, 人员`, params }
@@ -197,10 +197,10 @@ export const REPORT_DEFS = {
       { FTABNumber: 'T3', FTABName: '维修记录', FGroupNumber: 'G1' },
     ],
     detail: {
-      T1: (row) => ({ sql: `select FBillNo as 记录单号, FMouldNumber as 模具编码, FChkStartTime as 点检开始时间, FHandler as 处理人, FCreateDate as 创建时间
-        from T_MD_CheckRecord where deleted_at is null and FHandler = ? order by FInterID desc`, params: [String(row['人员'] ?? '')] }),
-      T2: (row) => ({ sql: `select FBillNo as 记录单号, FMouldNumber as 模具编码, FMainStartTime as 保养开始时间, FHandler as 处理人, FCreateDate as 创建时间
-        from T_MD_MainRecord where deleted_at is null and FHandler = ? order by FInterID desc`, params: [String(row['人员'] ?? '')] }),
+      T1: (row) => ({ sql: `select FBillNo as 记录单号, FMouldNumber as 模具编码, FChkStartTime as 点检开始时间, coalesce(nullif(FOperatEmp, ''), FHandler) as 处理人, FCreateDate as 创建时间
+        from T_MD_CheckRecord where deleted_at is null and coalesce(nullif(FOperatEmp, ''), FHandler) = ? order by FInterID desc`, params: [String(row['人员'] ?? '')] }),
+      T2: (row) => ({ sql: `select FBillNo as 记录单号, FMouldNumber as 模具编码, FMainStartTime as 保养开始时间, coalesce(nullif(FOperatEmp, ''), FHandler) as 处理人, FCreateDate as 创建时间
+        from T_MD_MainRecord where deleted_at is null and coalesce(nullif(FOperatEmp, ''), FHandler) = ? order by FInterID desc`, params: [String(row['人员'] ?? '')] }),
       T3: (row) => ({ sql: `select FBillNo as 记录单号, FMouldNumber as 模具编码, FRepairDate as 维修日期, FResult as 维修结果, FCreateDate as 创建时间
         from T_MD_Server where deleted_at is null and FPrincipal = ? order by FInterID desc`, params: [String(row['人员'] ?? '')] }),
     },
@@ -253,10 +253,10 @@ export const REPORT_DEFS = {
       { FTABNumber: 'T6', FTABName: '归还', FGroupNumber: 'G1' },
     ],
     detail: {
-      T1: (row) => ({ sql: `select FBillNo as 单号, FScheNumber as 方案, FChkStartTime as 开始时间, FHandler as 处理人, FCreateDate as 时间 from T_MD_CheckRecord where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
-      T2: (row) => ({ sql: `select FBillNo as 单号, FScheNumber as 方案, FMainStartTime as 开始时间, FHandler as 处理人, FCreateDate as 时间 from T_MD_MainRecord where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
+      T1: (row) => ({ sql: `select FBillNo as 单号, FScheNumber as 方案, FChkStartTime as 开始时间, coalesce(nullif(FOperatEmp, ''), FHandler) as 处理人, FCreateDate as 时间 from T_MD_CheckRecord where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
+      T2: (row) => ({ sql: `select FBillNo as 单号, FScheNumber as 方案, FMainStartTime as 开始时间, coalesce(nullif(FOperatEmp, ''), FHandler) as 处理人, FCreateDate as 时间 from T_MD_MainRecord where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
       T3: (row) => ({ sql: `select FBillNo as 单号, FRepairContent as 内容, FPrincipal as 负责人, FResult as 结果, FCreateDate as 时间 from T_MD_Server where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
-      T4: (row) => ({ sql: `select FBillNo as 单号, FFaultDesc as 故障描述, FReporter as 报修人, FStatus as 状态, FCreateDate as 时间 from T_MD_Repair where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
+      T4: (row) => ({ sql: `select FBillNo as 单号, FFaultDesc as 故障描述, coalesce(nullif(FRPTRepairerEmp, ''), FReporter) as 报修人, FStatus as 状态, FCreateDate as 时间 from T_MD_Repair where deleted_at is null and FMouldNumber = ? order by FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
       T5: (row) => ({ sql: `select h.FBillNo as 单号, h.FPickEmp as 领用人, h.FPickTime as 领用时间, e.FPickQty as 数量 from T_MD_PickRecord h join T_MD_PickRecordEntry e on e.FInterID = h.FInterID where h.deleted_at is null and e.FMouldNumber = ? order by h.FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
       T6: (row) => ({ sql: `select h.FBillNo as 单号, h.FReturnEmp as 归还人, h.FReturnTime as 归还时间, e.FReturnQty as 数量 from T_MD_ReturnRecord h join T_MD_ReturnRecordEntry e on e.FInterID = h.FInterID where h.deleted_at is null and e.FMouldNumber = ? order by h.FInterID desc`, params: [String(row['模具编码'] ?? '')] }),
     },

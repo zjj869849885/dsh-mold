@@ -463,6 +463,7 @@ export const PAGE_DEFS = {
       { metaKey: '申请时间', dbCol: 'FApplyTime', title: '申请时间', type: 'date' },
       { metaKey: '预计领用时间', dbCol: 'FExReceiveDate', title: '预计领用时间', type: 'date' },
       { metaKey: '预计归还时间', dbCol: 'FExReturn', title: '预计归还时间', type: 'date' },
+      { metaKey: '来源单据号', dbCol: 'FSourceBillNo', title: '来源单据号', type: 'text' },
       { metaKey: '备注', dbCol: 'FNote', title: '备注', type: 'memo' },
       { metaKey: '创建时间', dbCol: 'FCreateDate', title: '创建时间', type: 'datetime', readonly: true },
       { metaKey: '更新时间', dbCol: 'FModifyTime', title: '更新时间', type: 'datetime', readonly: true },
@@ -496,6 +497,7 @@ export const PAGE_DEFS = {
       { metaKey: '领用时间', dbCol: 'FPickTime', title: '领用时间', type: 'date' },
       { metaKey: '处理人', dbCol: 'FOperatEmp', title: '处理人', type: 'dict', dict: 'employee', itemRef: 'MDEmployee' },
       { metaKey: '处理时间', dbCol: 'FOperatTime', title: '处理时间', type: 'date' },
+      { metaKey: '来源单据号', dbCol: 'FSourceBillNo', title: '来源单据号', type: 'text' },
       { metaKey: '备注', dbCol: 'FNote', title: '备注', type: 'memo' },
       { metaKey: '创建时间', dbCol: 'FCreateDate', title: '创建时间', type: 'datetime', readonly: true },
       { metaKey: '更新时间', dbCol: 'FModifyTime', title: '更新时间', type: 'datetime', readonly: true },
@@ -527,6 +529,7 @@ export const PAGE_DEFS = {
       { metaKey: '归还时间', dbCol: 'FReturnTime', title: '归还时间', type: 'date' },
       { metaKey: '处理人', dbCol: 'FOperatEmp', title: '处理人', type: 'dict', dict: 'employee', itemRef: 'MDEmployee' },
       { metaKey: '处理时间', dbCol: 'FOperatTime', title: '处理时间', type: 'date' },
+      { metaKey: '来源单据号', dbCol: 'FSourceBillNo', title: '来源单据号', type: 'text' },
       { metaKey: '备注', dbCol: 'FNote', title: '备注', type: 'memo' },
       { metaKey: '创建时间', dbCol: 'FCreateDate', title: '创建时间', type: 'datetime', readonly: true },
       { metaKey: '更新时间', dbCol: 'FModifyTime', title: '更新时间', type: 'datetime', readonly: true },
@@ -575,7 +578,7 @@ export const PAGE_DEFS = {
       { metaKey: '使用组织', dbCol: 'FORGID', title: '使用组织', type: 'dict', dict: 'org', itemRef: 'MDOrg', readonly: true, showLock: true },
       { metaKey: '单据内码', dbCol: 'FInterID', title: '内码', type: 'int', hidden: true },
       { metaKey: '单据编号', dbCol: 'FBillNo', title: '单据编号', type: 'text', readonly: true },
-      { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', required: true, moldRef: true, attach: { 模具名称: 'FName' } },
+      { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', required: true, moldRef: true, attach: { 模具名称: 'FName', 汇报前模次: 'used_shots' } },
       { metaKey: '模具名称', dbCol: 'FMouldName', title: '模具名称', type: 'text' },
       { metaKey: '汇报人', dbCol: 'FEmp', title: '汇报人', type: 'dict', dict: 'employee', itemRef: 'MDEmployee', required: true },
       { metaKey: '汇报前模次', dbCol: 'FPreRptNum', title: '汇报前模次', type: 'decimal' },
@@ -623,10 +626,10 @@ export const PAGE_DEFS = {
       { metaKey: '使用组织', dbCol: 'FORGID', title: '使用组织', type: 'dict', dict: 'org', itemRef: 'MDOrg', readonly: true, showLock: true },
       { metaKey: '单据内码', dbCol: 'FInterID', title: '内码', type: 'int', hidden: true },
       { metaKey: '单据编号', dbCol: 'FBillNo', title: '单据编号', type: 'text', readonly: true },
-      { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', required: true, moldRef: true, attach: { 模具名称: 'FName' } },
+      { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', required: true, moldRef: true, attach: { 模具名称: 'FName', 当前状态: 'FMDStatus' } },
       { metaKey: '模具名称', dbCol: 'FMouldName', title: '模具名称', type: 'text' },
-      { metaKey: '当前状态', dbCol: 'FMDStatus', title: '当前状态', type: 'enum', enum: ['在库', '生产', '维修', '保养', '点检', '报废', '停用', '不在库'] },
-      { metaKey: '变更后状态', dbCol: 'FUpdateMDStatus', title: '变更后状态', type: 'enum', enum: ['在库', '生产', '维修', '保养', '点检', '报废', '停用', '不在库'] },
+      { metaKey: '当前状态', dbCol: 'FMDStatus', title: '当前状态', type: 'enum', enum: ['在库', '生产中', '维修中', '保养中', '点检', '报废', '停用', '不在库'] },
+      { metaKey: '变更后状态', dbCol: 'FUpdateMDStatus', title: '变更后状态', type: 'enum', enum: ['在库', '生产中', '维修中', '保养中', '点检', '报废', '停用', '不在库'] },
       { metaKey: '接收人', dbCol: 'FReceiverEmp', title: '接收人', type: 'dict', dict: 'employee', itemRef: 'MDEmployee', required: true },
       { metaKey: '接收时间', dbCol: 'FReceiverDate', title: '接收时间', type: 'date' },
       { metaKey: '备注', dbCol: 'FNote', title: '备注', type: 'memo' },
@@ -702,6 +705,7 @@ export function buildPageFilterMeta(strFunc, { dictOptions = {}, moldNumbers = [
     else if (f.dict && Array.isArray(dictOptions[f.dict])) opts = dictOptions[f.dict]
     else if (Array.isArray(f.enum)) opts = f.enum
     if (opts && (force || opts.length)) row._options = opts.map((v) => ({ value: String(v), label: String(v) }))
+    else if (f.itemRef || f.refOf) row.FInputType = '手工录入'
     // 表体/表头「选编码带名称」：源编码字段声明 attach（目标 metaKey ← 源台账 dbCol），前端 attachWrites
     //  按 _dropValueName 命中 _dropRows 行、取 FInputInfo 第 2 个 [...] 目标列写入 name（同行/同单目标字段）。
     if (f.attach) {
@@ -910,21 +914,53 @@ export function auditableColOf(strFunc) {
 export const BILL_DOWNSTREAM_REFS = {
   '203101': [
     { table: 'T_MD_Part', col: 'FMouldNumber', match: 'code' },
-    // 备件档案 203103 独立台账无模具列，不在引用面
+    { table: 'T_MD_ChkSched', col: 'FMouldNumber', match: 'code' },
+    { table: 'T_MD_MainSched', col: 'FMouldNumber', match: 'code' },
     { table: 'T_MD_Repair', col: 'FMouldNumber', match: 'code' },
     { table: 'T_MD_CheckTask', col: 'FMouldNumber', match: 'code' },
     { table: 'T_MD_CheckRecord', col: 'FMouldNumber', match: 'code' },
     { table: 'T_MD_MainTask', col: 'FMouldNumber', match: 'code' },
     { table: 'T_MD_MainRecord', col: 'FMouldNumber', match: 'code' },
     { table: 'T_MD_ServerTask', col: 'FMouldNumber', match: 'code' },
-    // 领用/归还记录单：模具编码在表体行（头表只有人员/时间）
+    { table: 'T_MD_Server', col: 'FMouldNumber', match: 'code' },
+    // 业务处理：申领/出库/领用/归还/盘点在表体行，报废/使用汇报/状态变更在表头
+    { table: 'T_MD_PordApplyEntry', head: 'T_MD_PordApply', col: 'FMouldNumber', match: 'code', entry: true },
+    { table: 'T_MD_OutboundApplyEntry', head: 'T_MD_OutboundApply', col: 'FMouldNumber', match: 'code', entry: true },
     { table: 'T_MD_PickRecordEntry', head: 'T_MD_PickRecord', col: 'FMouldNumber', match: 'code', entry: true },
     { table: 'T_MD_ReturnRecordEntry', head: 'T_MD_ReturnRecord', col: 'FMouldNumber', match: 'code', entry: true },
+    { table: 'T_MD_Scrap', col: 'FMouldNumber', match: 'code' },
+    { table: 'T_MD_UseReport', col: 'FMouldNumber', match: 'code' },
+    { table: 'T_MD_StocktakingEntry', head: 'T_MD_Stocktaking', col: 'FMouldNumber', match: 'code', entry: true },
+    { table: 'T_MD_StatusChange', col: 'FMouldNumber', match: 'code' },
+  ],
+  '203102': [{ table: 'T_MD_ServerEntry', head: 'T_MD_Server', col: 'FPartNumber', match: 'code', entry: true }],
+  '203103': [
+    { table: 'T_MD_CheckRecordEntry_A', head: 'T_MD_CheckRecord', col: 'FMtrlNumber', match: 'code', entry: true },
+    { table: 'T_MD_MainRecordEntry_A', head: 'T_MD_MainRecord', col: 'FMtrlNumber', match: 'code', entry: true },
+  ],
+  '203110': [
+    { table: 'T_MD_CheckTaskEntry', head: 'T_MD_CheckTask', col: 'FChkItemNumber', match: 'code', entry: true },
+    { table: 'T_MD_CheckRecordEntry', head: 'T_MD_CheckRecord', col: 'FChkItemNumber', match: 'code', entry: true },
+  ],
+  '203111': [
+    { table: 'T_MD_CheckTask', col: 'FScheNumber', match: 'code' },
+    { table: 'T_MD_CheckRecord', col: 'FScheNumber', match: 'code' },
+  ],
+  '203120': [
+    { table: 'T_MD_MainTaskEntry', head: 'T_MD_MainTask', col: 'FMainItemNumber', match: 'code', entry: true },
+    { table: 'T_MD_MainRecordEntry', head: 'T_MD_MainRecord', col: 'FMainItemNumber', match: 'code', entry: true },
+  ],
+  '203121': [
+    { table: 'T_MD_MainTask', col: 'FScheNumber', match: 'code' },
+    { table: 'T_MD_MainRecord', col: 'FScheNumber', match: 'code' },
   ],
   '203130': [{ table: 'T_MD_ServerTask', col: 'FRepairBillNo', match: 'billNo' }],
   '203114': [{ table: 'T_MD_CheckRecord', col: 'FSourceBillNo', match: 'billNo' }],
   '203124': [{ table: 'T_MD_MainRecord', col: 'FSourceBillNo', match: 'billNo' }],
   '203131': [{ table: 'T_MD_Server', col: 'FSourceBillNo', match: 'billNo' }],
+  '203140': [{ table: 'T_MD_OutboundApply', col: 'FSourceBillNo', match: 'billNo' }],
+  '203141': [{ table: 'T_MD_PickRecord', col: 'FSourceBillNo', match: 'billNo' }],
+  '203142': [{ table: 'T_MD_ReturnRecord', col: 'FSourceBillNo', match: 'billNo' }],
 }
 
 /** /data 服务端过滤键 → 物理列（含 H_H_ 前缀与日期 From/To 拆分，同 mold filterColOf 口径）。 */
