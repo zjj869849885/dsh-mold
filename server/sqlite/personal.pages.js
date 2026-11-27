@@ -838,6 +838,7 @@ export function pageContractToRow(strFunc, contract) {
     const col = map.get(k)
     if (col) out[col] = v === undefined ? null : v
   }
+  if (Object.prototype.hasOwnProperty.call(contract || {}, 'FCreater')) out.FCreater = contract.FCreater
   return out
 }
 
@@ -857,6 +858,7 @@ export function pageRowToContract(strFunc, row) {
     out['单据状态'] = BILL_STATE_TEXT[String(row.FBillState)] || BILL_STATE_TEXT['0']
   }
   // 审核人/审核日期（缺陷修复 2026-11-21）：物理列直取透出（前端「其他」块按 FApproverID/FApproverDate 读），不进 /data 列头。
+  if (row && row.FCreater !== undefined) out['FCreater'] = row.FCreater
   if (row && row.FApproverID !== undefined) out['FApproverID'] = row.FApproverID
   if (row && row.FApproverDate !== undefined) out['FApproverDate'] = row.FApproverDate
   return out
@@ -866,7 +868,7 @@ export function pageRowToContract(strFunc, row) {
 export function pageColsInsert(strFunc) {
   const def = PAGE_DEFS[String(strFunc)]
   const skip = new Set(['FInterID', 'FCreateDate', 'FModifyTime', 'deleted_at', 'FBillNo'])
-  return def.fields.map((f) => f.dbCol).filter((c) => !skip.has(c))
+  return [...new Set([...def.fields.map((f) => f.dbCol), 'FCreater'])].filter((c) => !skip.has(c))
 }
 
 /** 单据状态文本（企业 FStatus 整数语义 → 中文，前端「其他」块/stag 直接消费）。 */
@@ -1023,4 +1025,6 @@ export const ITEM_BIZ_REFS = (() => {
   add('MDOrg', 'T_MD_Item', 'FORGID', '')
   return idx
 })()
+
+
 

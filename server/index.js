@@ -21,6 +21,8 @@ import { isItemStrFunc } from './sqlite/personal.item.js'
 import { isReportStrFunc, buildReport, buildReportDetail } from './sqlite/personal.report.js'
 import { buildPushNextRow } from './sqlite/personal.push.js'
 import { registerPersonalTools } from './sqlite/personal.tools.js'
+import { registerAiRoutes } from './sqlite/personal.ai.js'
+import { registerPromoRoutes } from './promo/promo.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PKG = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8'))
@@ -185,39 +187,88 @@ const LOCAL_USER = (() => {
     return '本机用户'
   }
 })()
-// 操作员名解析（harness 登录账号优先）：经 ctx.inject(['deepseekAccount']) 取宿主账号服务，
-// getProfile 拿 profile.name（本机已登录的 DeepSeek 账号，即宿主左下角所示身份），命中后进程内粘性缓存
-// （/pages 不反复打网络、制单人 FCreater 稳定）；服务缺失/未登录/离线/异常如实回落 LOCAL_USER。
-// 注：ctx.get 仅能取到已声明依赖，deepseekAccount 非本包静态 inject，必须走 ctx.inject 动态获取。
+// 操作员名解析（Harness 登录账号优先）：显示规则与宿主账号菜单一致，name 为空时取 contact。
+// watch(..., true) 即时感知身份变化；服务缺失/未登录/离线/异常时回落本机用户。
+// deepseekAccount 非本包静态 inject，必须用 ctx.inject 动态获取。
 function makeOperator(ctx) {
-  let opName = null, inflight = false, lastTry = 0, acct = null
-  async function refresh(force) {
-    if (!acct || inflight || typeof acct.getProfile !== 'function') return
+  let opName = '', inflight = null, forced = null, inflightForce = false, inflightEpoch = 0, lastTry = 0, acct = null, watching = false, epoch = 0
+  const lifetime = new AbortController()
+  const fallbackName = () => String(typeof fallback === 'function' ? fallback() : (fallback || '')).trim()
+  const fallbackValue = () => LOCAL_USER
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const identityOf = (profile) => {
+    if (!profile || profile.status !== 'ready' || !profile.value) return ''
+    return [profile.value.name, profile.value.contact]
+      .map((value) => String(value == null ? '' : value).trim())
+      .find(Boolean) || ''
+  }
+  async function startRefresh(force) {
+    if (!acct || typeof acct.getProfile !== 'function') return
     const now = Date.now()
     if (!force && now - lastTry < 15000) return
     lastTry = now
-    inflight = true
-    try {
-      const p = await acct.getProfile({ version: String(PKG.version || '0.0.0'), locale: 'zh-CN', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 })
-      if (p && p.status === 'ready' && p.value && p.value.name) opName = String(p.value.name)
-    } catch { /* 离线/未登录：保持回落，下次再试 */ }
-    finally { inflight = false }
+    const requestEpoch = epoch
+    const request = (async () => {
+      try {
+        const profile = await acct.getProfile({ version: String(PKG.version || '0.0.0'), locale: 'zh-CN', timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 })
+        if (requestEpoch !== epoch) return
+        if (profile === null) opName = ''
+        else if (profile && profile.status === 'ready') opName = identityOf(profile)
+      } catch { /* 离线/未登录：保留最近一次成功值，等待 watch 或下次刷新 */ }
+    })()
+    inflight = request
+    inflightForce = force
+    inflightEpoch = requestEpoch
+    try { await request } finally { if (inflight === request) { inflight = null; inflightForce = false } }
   }
-  // deepseekAccount 就绪后预热一次；真实 cordis 下服务缺失只是不触发回调，恒回落 LOCAL_USER。
-  // 探针/无 Host 的 mock ctx 其 inject 会对不在 scope 的依赖同步抛错，故 try 兜住以保持零 Host 依赖可跑。
-  try { if (ctx && typeof ctx.inject === 'function') ctx.inject(['deepseekAccount'], (scope) => { acct = scope.deepseekAccount; void refresh(true) }) } catch { /* mock/无该服务：保持回落 LOCAL_USER */ }
+  function refresh(force) {
+    if (!inflight) return startRefresh(force)
+    if (!force || (inflightForce && inflightEpoch === epoch)) return inflight
+    if (forced) return forced
+    // 强制刷新与在途普通查询合并：旧查询结束后所有等待者共享一次新查询。
+    forced = inflight.then(() => startRefresh(true)).finally(() => { forced = null })
+    return forced
+  }
+  function watchIdentity() {
+    if (watching || !acct || typeof acct.watch !== 'function') return
+    watching = true
+    void (async () => {
+      try {
+        for await (const update of acct.watch(lifetime.signal, true)) {
+          if (lifetime.signal.aborted) break
+          epoch += 1
+          if (!update || !update.state || update.state.status !== 'credential-stored') {
+            opName = ''
+            continue
+          }
+          if (update.type === 'credentials-changed') opName = ''
+          await refresh(true)
+        }
+      } catch { /* 服务关闭/连接中断：保留节流与有界等待兜底 */ }
+    })()
+  }
+  try {
+    if (ctx && typeof ctx.inject === 'function') {
+      ctx.inject(['deepseekAccount'], (scope) => {
+        acct = scope.deepseekAccount
+        void refresh(true)
+        watchIdentity()
+      })
+    }
+  } catch { /* mock/无该服务：使用回落值 */ }
+  if (ctx && typeof ctx.effect === 'function') ctx.effect(() => () => lifetime.abort())
   return {
-    current() { return opName || LOCAL_USER },
-    // 首屏兜底：opName 未就绪时最多等 timeoutMs，确保 /pages 首次即返回登录账号名。
-    async ensure(timeoutMs = 2000) {
+    current() { return opName || fallbackValue() },
+    async ensure(timeoutMs = 2000, force = false) {
+      const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0)
+      await Promise.race([refresh(force), sleep(Math.max(1, deadline - Date.now()))])
       if (opName) return opName
-      const start = Date.now()
-      while (!opName && Date.now() - start < timeoutMs) {
-        await refresh(true)
-        if (opName) break
-        await new Promise((r) => setTimeout(r, 150))
+      while (Date.now() < deadline) {
+        await sleep(100)
+        await Promise.race([refresh(false), sleep(Math.max(1, deadline - Date.now()))])
+        if (opName) return opName
       }
-      return opName || LOCAL_USER
+      return opName || fallbackValue()
     },
   }
 }
@@ -662,7 +713,7 @@ async function startInProcLanServer(routes, prefix, port = DEFAULT_LAN_PORT) {
       }
 
       // 4. 插件业务 API 路由
-      const handler = routes[pathname]
+      const handler = routes[pathname] || (pathname.startsWith(`${prefix}/promo/assets/`) ? routes[`${prefix}/promo/assets/`] : null)
       if (handler) {
         if (setCookieHdr) res.setHeader('set-cookie', setCookieHdr)
         const r = handler(req, res)
@@ -1004,6 +1055,17 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     res.writeHead(405, { allow: 'GET, HEAD, POST, DELETE' }); res.end()
   }
 
+  routes[`${prefix}/user`] = async (req, res) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
+    const force = typeof req.url === 'string' && /[?&]refresh=1(?:&|$)/.test(req.url)
+    const userName = await operator.ensure(2000, force)
+    const out = { ok: true }
+    if (userName) out.user = { name: userName }
+    const body = JSON.stringify(out)
+    res.writeHead(200, JSON_HEADERS_OK)
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
   routes[`${prefix}/pages`] = async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }); res.end(); return }
     const body = JSON.stringify({
@@ -1089,7 +1151,7 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
       // head[0] = 契约行（metaKey 中文键，前端按 Info.FField 对齐回填）+ 系统键（FInterID/状态「其他」块消费）。
       // displayMap 空：下拉选项已由 /billinit Info._options 直供；FileList 空：个人版附件能力未接入（如实空值）。
       // 表体页（第五批）：各页签行数组按顶层 tab 键出参（value.B1=[…]，前端 BillForm raw[tab] 消费，与企业 getDetail 同形）。
-      const head0 = { FInterID: Number(fid), FStatus: '0', FCloseStatus: '0', FBillNo: String(row['单据编号'] ?? row['模具编号'] ?? row['部件编号'] ?? row['报修单号'] ?? row['记录单号'] ?? ''), FCreater: operator.current(), FCreateDate: row['创建时间'] ?? '', ...row }
+      const head0 = { FInterID: Number(fid), FStatus: '0', FCloseStatus: '0', FBillNo: String(row['单据编号'] ?? row['模具编号'] ?? row['部件编号'] ?? row['报修单号'] ?? row['记录单号'] ?? ''), FCreater: row.FCreater ?? row['制单人'] ?? '', FCreateDate: row['创建时间'] ?? '', ...row }
       const bodies = isMold(strFunc) ? {} : adapter.getPageBodies(strFunc, fid)
       sendJson(res, 200, { ok: true, strFunc, value: { head: [head0], ...bodies, displayMap: [], FileList: [] }, desc: '', message: '' })
     })
@@ -1098,7 +1160,7 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
   routes[`${prefix}/save`] = (req, res) => {
     if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
     // 图片 base64 走 FImage 键（前端 Image 控件剥前缀后下发），上限与企业版对齐放宽到 8MB
-    readJsonBody(req, res, 8388608, (source) => {
+    readJsonBody(req, res, 8388608, async (source) => {
       const strFunc = typeof source.strFunc === 'string' ? source.strFunc.trim() : ''
       if (strFunc === '' || !knownPage(strFunc)) { sendJson(res, 200, unknownFunc(strFunc)); return }
       const data = source.Data && typeof source.Data === 'object' ? source.Data : {}
@@ -1144,6 +1206,12 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
         sendJson(res, 200, { ok: false, strFunc, desc: '', message: '无法识别的图片格式（PNG/JPEG/GIF/BMP/WEBP 之外不支持）' })
         return
       }
+      // 审计字段服务端权威：新增写当前账号，编辑不覆盖原制单人和制单日期。
+      delete contract['FCreater']
+      delete contract['FCreateDate']
+      delete contract['制单人']
+      delete contract['创建时间']
+      if (finterid === 0) contract['FCreater'] = await operator.ensure(2000)
       let saved
       try {
         saved = isMold(strFunc) ? adapter.saveMold(contract) : adapter.savePage(strFunc, contract, bodiesMap)
@@ -1162,7 +1230,7 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
         value: String(saved.id),
         desc: `单据编号${codeVal}`,
         message: '',
-        result: { FInterID: saved.id, FBillNo: codeVal, FCreater: operator.current(), FCreateDate: row ? row['创建时间'] : '', FileList: [] },
+        result: { FInterID: saved.id, FBillNo: codeVal, FCreater: row ? (row.FCreater ?? row['制单人'] ?? '') : '', FCreateDate: row ? row['创建时间'] : '', FileList: [] },
       })
     })
   }
@@ -1395,6 +1463,11 @@ export function createRoutes(adapter, prefix = '/m10-mold-personal/api', operato
     readJsonBody(req, res, 262144, (source) => sendJson(res, 200, { ...notWired('过滤条件设置'), strFunc: String(source.strFunc ?? '') }))
   }
 
+  // 推广位本地路由（设计稿-个人版推广位方案；零外部请求，素材只认包内白名单，kill switch 见 creatives.json globalEnabled）
+  registerPromoRoutes(routes, adapter, prefix)
+  // 个人版模块内 AI 助手本地数据分析路由（只读 SQLite，断网可用）
+  registerAiRoutes(routes, adapter, prefix)
+
   return routes
 }
 
@@ -1447,3 +1520,5 @@ export function apply(ctx, config = {}) {
   })
   return { adapter, routes, runtime }
 }
+
+

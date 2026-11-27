@@ -44,6 +44,7 @@ export function migrate(db) {
     }
   }
   ensureBillStateColumns(db)
+  ensureCreatorColumns(db)
   return getUserVersion(db)
 }
 
@@ -80,6 +81,14 @@ export function ensureBillStateColumns(db) {
   }
 }
 
+/** 个人版全部 DP 表幂等补齐制单人列；旧库升级与新建库使用同一入口。 */
+export function ensureCreatorColumns(db) {
+  const tables = ['T_MD_Mould', ...Object.values(PAGE_DEFS).map((def) => def.table)]
+  for (const table of new Set(tables)) {
+    const cols = db.prepare('PRAGMA table_info(' + table + ')').all().map((c) => String(c.name))
+    if (!cols.includes('FCreater')) db.prepare('alter table ' + table + ' add column FCreater TEXT DEFAULT ' + "''").run()
+  }
+}
 /** 打开（或首启创建）本地库：建目录树 → PRAGMA → 迁移。返回 { db, dataDir, dbPath }。 */
 export function openDatabase(dataDirOpt) {
   const dataDir = resolveDataDir(dataDirOpt)
@@ -159,3 +168,4 @@ export function swapDatabaseFile(dbHandle, newDbPath, dataDirOpt) {
   copyFileSync(newDbPath, dbPath)
   return openDatabase(dataDirOpt)
 }
+

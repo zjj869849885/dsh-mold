@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="280" viewBox="0 0 640 280">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f4f8ff"/>
+      <stop offset="1" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#94a3b8"/>
+      <stop offset=".28" stop-color="#e2e8f0"/>
+      <stop offset=".55" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#64748b"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#1e3a8a" flood-opacity=".16"/>
+    </filter>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#93c5fd" stroke-opacity=".18"/>
+    </pattern>
+  </defs>
+  <rect width="640" height="280" rx="20" fill="url(#bg)"/>
+  <rect width="640" height="280" rx="20" fill="url(#grid)"/>
+  <circle cx="556" cy="36" r="86" fill="#bfdbfe" opacity=".45"/>
+  <circle cx="74" cy="256" r="92" fill="#dbeafe" opacity=".7"/>
+  <g transform="translate(42 24)">
+    <rect width="92" height="26" rx="13" fill="#2563eb"/>
+    <text x="46" y="18" text-anchor="middle" fill="#fff" font-family="Microsoft YaHei,Arial,sans-serif" font-size="12">演示素材</text>
+  </g>
+  <ellipse cx="372" cy="238" rx="204" ry="24" fill="#1e40af" opacity=".12"/>
+  <g filter="url(#shadow)" transform="translate(214 46) rotate(-8 150 100)">
+    <rect x="20" y="34" width="286" height="132" rx="22" fill="#eff6ff" stroke="#bfdbfe" stroke-width="2"/>
+    <g transform="translate(48 58)">
+      <rect x="0" y="24" width="58" height="92" rx="16" fill="url(#steel)"/>
+      <ellipse cx="29" cy="26" rx="29" ry="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+      <ellipse cx="29" cy="26" rx="12" ry="5" fill="#64748b"/>
+      <rect x="0" y="104" width="58" height="20" rx="8" fill="url(#blue)"/>
+    </g>
+    <g transform="translate(130 42)">
+      <rect x="0" y="24" width="58" height="102" rx="16" fill="url(#steel)"/>
+      <ellipse cx="29" cy="26" rx="29" ry="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+      <ellipse cx="29" cy="26" rx="12" ry="5" fill="#64748b"/>
+      <rect x="0" y="114" width="58" height="20" rx="8" fill="url(#blue)"/>
+    </g>
+    <g transform="translate(212 66)">
+      <rect x="0" y="18" width="58" height="74" rx="16" fill="url(#steel)"/>
+      <ellipse cx="29" cy="20" rx="29" ry="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+      <ellipse cx="29" cy="20" rx="12" ry="5" fill="#64748b"/>
+    </g>
+  </g>
+  <g transform="translate(492 88)" filter="url(#shadow)">
+    <rect width="92" height="100" rx="16" fill="#1d4ed8"/>
+    <rect x="14" y="16" width="64" height="30" rx="8" fill="#60a5fa"/>
+    <path d="M24 66h44M24 78h30" stroke="#bfdbfe" stroke-width="6" stroke-linecap="round"/>
+  </g>
+  <g fill="#3b82f6">
+    <circle cx="190" cy="66" r="5" opacity=".55"/>
+    <circle cx="564" cy="214" r="7" opacity=".4"/>
+    <circle cx="176" cy="222" r="4" opacity=".45"/>
+  </g>
+</svg>

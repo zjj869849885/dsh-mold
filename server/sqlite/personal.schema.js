@@ -94,6 +94,7 @@ export function toContractRow(row) {
     out['单据状态'] = ({ '1': '已审核', '6': '已关闭' })[String(row.FStatus)] || '创建'
   }
   // 审核人/审核日期（缺陷修复 2026-11-21）：物理列直取透出（前端「其他」块按 FApproverID/FApproverDate 读），不进 /data 列头。
+  if (row && row.FCreater !== undefined) out['FCreater'] = row.FCreater
   if (row && row.FApproverID !== undefined) out['FApproverID'] = row.FApproverID
   if (row && row.FApproverDate !== undefined) out['FApproverDate'] = row.FApproverDate
   return out
@@ -106,6 +107,7 @@ export function fromContractRow(contract) {
     const dbCol = META2DB.get(k)
     if (dbCol) out[dbCol] = v === undefined ? null : v
   }
+  if (Object.prototype.hasOwnProperty.call(contract || {}, 'FCreater')) out.FCreater = contract.FCreater
   return out
 }
 
@@ -270,3 +272,4 @@ export function withDerived(row) {
     距下次保养模次: interval > 0 ? Math.max(0, interval - Math.max(0, used - lastMaint)) : null,
   }
 }
+

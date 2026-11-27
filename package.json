@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-m10-mold-personal",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "private": false,
   "engines": {
     "node": ">=22.13.0"

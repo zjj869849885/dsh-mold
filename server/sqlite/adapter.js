@@ -14,7 +14,7 @@ const MOLD_COLS_INSERT = ['FMDNumber', 'FName', 'FModel', 'FType', 'FMDStatus', 
   // 基础资料模块（请求D）：与 personal.schema.js MOLD_FIELDS 追加列同步（saveMold 仅写白名单列）
   'FBriefName', 'FSmallType', 'FChkStatus', 'FMDStockStatus', 'FDept', 'FProdLine', 'FStock', 'FStorageLoc', 'FMainSche', 'FCheckSche', 'FMainRole', 'FCheckRole',
   'FWeight', 'FWeightUnit', 'FItemName', 'FReceiverDate', 'FEnableDate', 'FScrapDate', 'FMDChargeDate', 'FSupplier', 'FCust', 'FBeforeENGR', 'FAdaptedType',
-  'FCycle', 'FDESCY', 'FLevelCY', 'FUsableCavity', 'FLifeWarn', 'FRemainLifeQty', 'FMDCost', 'FORGID']
+  'FMDCost', 'FORGID', 'FCreater']
 
 /** 字节头判型（与企业版 getImage 的 mimeOf 同口径，读端契约一致）。 */
 export function mimeOf(buf) {
@@ -789,3 +789,4 @@ export class PersonalSqliteAdapter {
     this.db.close()
   }
 }
+

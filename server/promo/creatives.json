@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "globalEnabled": true,
+  "vipPubKey": "-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VwAyEAW+6d8eSfTc+xJwXoyOr7eRBHDUunuhgQHpvKt4hmLbM=\\n-----END PUBLIC KEY-----\\n",
+  "note": "推广位素材白名单：仅本文件内 creatives 允许下发，接口不接受任何运行时外部输入。link 为示例落地页，真实投放前须替换为实际联系/官网地址。",
+  "creatives": [
+    {
+      "creative_id": "cp-personal-contact-strip-01",
+      "slot": "promo_expiry_strip",
+      "type": "self",
+      "title": "当前为个人免费版 · 如需去除提示、多端协同或企业定制服务，欢迎联系我们",
+      "desc": "",
+      "image": "",
+      "cta": "联系咨询",
+      "link": "https://example.com/contact",
+      "active": true
+    }
+  ]
+}
