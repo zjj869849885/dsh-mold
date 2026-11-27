@@ -1,9 +1,10 @@
 {
   "name": "dsh-plugin-m10-mold-personal",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "private": false,
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.13.0",
+    "dsh": ">=0.2.0-rc.2"
   },
   "description": "AI模具管理·个人版：node:sqlite 本地库、零外部依赖、单人离线、局域网多端。",
   "keywords": [

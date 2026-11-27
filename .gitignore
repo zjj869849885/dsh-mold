@@ -4,5 +4,6 @@ node_modules/
 *.db
 *.sqlite
 *.db-journal
+*.tgz
 .DS_Store
 Thumbs.db
