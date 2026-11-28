@@ -105,6 +105,7 @@ export const PAGE_DEFS = {
       { metaKey: '备件属性', dbCol: 'FProperty', title: '备件属性', type: 'dict', dict: 'spare_property' },
       { metaKey: '助记码', dbCol: 'FHelpCode', title: '助记码', type: 'text' },
       { metaKey: '基本单位', dbCol: 'FUnit', title: '基本单位', type: 'dict', dict: 'unit', itemRef: 'MDUnit' },
+      { metaKey: '库存数量', dbCol: 'qty', title: '库存数量', type: 'decimal' },
       { metaKey: '单价', dbCol: 'FPrice', title: '单价', type: 'decimal' },
       { metaKey: '币别', dbCol: 'FCurrency', title: '币别', type: 'dict', dict: 'currency', itemRef: 'MDCurrency', enum: ['人民币', '香港元', '欧元', '日本日圆', '新台币元', '英镑', '美元'], default: '人民币' },
       { metaKey: '默认仓库', dbCol: 'FStock', title: '默认仓库', type: 'dict', dict: 'stock', itemRef: 'MDStock' },
@@ -153,6 +154,16 @@ export const PAGE_DEFS = {
       { metaKey: '创建时间', dbCol: 'FCreateDate', title: '创建时间', type: 'datetime', readonly: true },
       { metaKey: '更新时间', dbCol: 'FModifyTime', title: '更新时间', type: 'datetime', readonly: true },
     ],
+    bodies: [
+      { tab: 'B1', name: '点检项目明细', table: 'T_MD_ChkSchedEntry', fields: [
+        { metaKey: '点检项目类型', dbCol: 'FChkItemType', title: '点检项目类型', type: 'item', itemRef: 'MDChkItemType' },
+        { metaKey: '点检项目编码', dbCol: 'FChkItemNumber', title: '点检项目编码', type: 'text', required: true, refOf: '203110', attach: { 点检项目: 'FChkItem', 点检要求: 'FChkAsk', 点检项目类型: 'FChkItemType' } },
+        { metaKey: '点检项目', dbCol: 'FChkItem', title: '点检项目', type: 'text' },
+        { metaKey: '点检要求', dbCol: 'FChkAsk', title: '点检要求', type: 'text' },
+        { metaKey: '点检标准', dbCol: 'FChkStandard', title: '点检标准', type: 'text' },
+        { metaKey: '备注', dbCol: 'FNote', title: '备注', type: 'memo' },
+      ] },
+    ],
     filterKeys: ['点检方案编码', '点检方案名称', '模具编码'],
   },
   '203120': {
@@ -191,6 +202,15 @@ export const PAGE_DEFS = {
       { metaKey: '说明', dbCol: 'FExplain', title: '说明', type: 'memo' },
       { metaKey: '创建时间', dbCol: 'FCreateDate', title: '创建时间', type: 'datetime', readonly: true },
       { metaKey: '更新时间', dbCol: 'FModifyTime', title: '更新时间', type: 'datetime', readonly: true },
+    ],
+    bodies: [
+      { tab: 'B1', name: '保养项目明细', table: 'T_MD_MainSchedEntry', fields: [
+        { metaKey: '保养项目类型', dbCol: 'FMainItemType', title: '保养项目类型', type: 'item', itemRef: 'MDMainItemType' },
+        { metaKey: '保养项目编码', dbCol: 'FMainItemNumber', title: '保养项目编码', type: 'text', required: true, refOf: '203120', attach: { 保养项目: 'FMainItem', 保养要求: 'FMainAsk', 保养项目类型: 'FMainItemType' } },
+        { metaKey: '保养项目', dbCol: 'FMainItem', title: '保养项目', type: 'text' },
+        { metaKey: '保养要求', dbCol: 'FMainAsk', title: '保养要求', type: 'text' },
+        { metaKey: '备注', dbCol: 'FNote', title: '备注', type: 'memo' },
+      ] },
     ],
     filterKeys: ['保养方案编码', '保养方案名称', '模具编码'],
   },
@@ -470,7 +490,7 @@ export const PAGE_DEFS = {
     ],
     bodies: [
       { tab: 'B1', name: '出库申请明细', table: 'T_MD_OutboundApplyEntry', fields: [
-        { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', moldRef: true, required: true, attach: { 模具名称: 'FName' } },
+        { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', moldRef: true, required: true, attach: { 模具名称: 'FName', 出库模次: 'used_shots' } },
         { metaKey: '模具名称', dbCol: 'FMouldName', title: '模具名称', type: 'text' },
         { metaKey: '存放仓库', dbCol: 'FStock', title: '存放仓库', type: 'dict', dict: 'stock', itemRef: 'MDStock' },
         { metaKey: '存放仓位', dbCol: 'FStorageLoc', title: '存放仓位', type: 'dict', dict: 'storage_loc', itemRef: 'MDLocation' },
@@ -536,7 +556,7 @@ export const PAGE_DEFS = {
     ],
     bodies: [
       { tab: 'B1', name: '归还明细', table: 'T_MD_ReturnRecordEntry', fields: [
-        { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', moldRef: true, required: true, attach: { 模具名称: 'FName' } },
+        { metaKey: '模具编码', dbCol: 'FMouldNumber', title: '模具编码', type: 'text', moldRef: true, required: true, attach: { 模具名称: 'FName', 入库模次: 'used_shots' } },
         { metaKey: '模具名称', dbCol: 'FMouldName', title: '模具名称', type: 'text' },
         { metaKey: '申领机台', dbCol: 'FMach', title: '申领机台(生产中心)', type: 'dict', dict: 'prod_line', itemRef: 'MDProdLine' },
         { metaKey: '班制', dbCol: 'FShift', title: '班制', type: 'text' },
@@ -611,6 +631,7 @@ export const PAGE_DEFS = {
         { metaKey: '模具名称', dbCol: 'FMouldName', title: '模具名称', type: 'text' },
         { metaKey: '帐存数量', dbCol: 'FAccountQty', title: '帐存数量', type: 'decimal' },
         { metaKey: '盘点数量', dbCol: 'FStocktakQty', title: '盘点数量', type: 'decimal' },
+        { metaKey: '盈亏差额', dbCol: 'FDiffQty', title: '盈亏差额', type: 'decimal', readonly: true },
         { metaKey: '存放地点', dbCol: 'FPosition', title: '存放地点', type: 'dict', dict: 'storage_loc', itemRef: 'MDLocation' },
         { metaKey: '备注', dbCol: 'FNote', title: '备注', type: 'memo' },
       ] },
@@ -679,9 +700,23 @@ export function numericMetaKeys(strFunc) {
 export function buildPageFilterMeta(strFunc, { dictOptions = {}, moldNumbers = [], itemOptions = {}, refValues = {}, refRows = {}, moldRows = [], curOrgName = '' } = {}) {
   const def = PAGE_DEFS[String(strFunc)]
   if (!def) return { ok: false, strFunc, message: `未知子页 strFunc：${strFunc}` }
+  // 带出目标字段一律只读（主流 ERP 口径：防手改造成「编码与名称/快照不一致」）。
+  const headAttachTargets = new Set()
+  for (const f of def.fields || []) {
+    if (f.attach) for (const k of Object.keys(f.attach)) headAttachTargets.add(k)
+  }
+  const bodyAttachTargets = {}
+  for (const b of def.bodies || []) {
+    const s = new Set()
+    for (const f of b.fields || []) {
+      if (f.attach) for (const k of Object.keys(f.attach)) s.add(k)
+    }
+    bodyAttachTargets[b.tab] = s
+  }
   const infoRow = (f, tab = 'H') => {
     const dt = dtypeOf(f)
     if (f.moldRef) dt.FInputType = '下拉查询选择'
+    const isAttachedTarget = tab === 'H' ? headAttachTargets.has(f.metaKey) : !!(bodyAttachTargets[tab] && bodyAttachTargets[tab].has(f.metaKey))
     const row = {
       FField: f.metaKey,
       FFieldName: f.title || f.metaKey,
@@ -691,7 +726,7 @@ export function buildPageFilterMeta(strFunc, { dictOptions = {}, moldNumbers = [
       FInputType: dt.FInputType,
       FIsMust: f.required ? 1 : 0,
       FDefaultValue: f.showLock ? curOrgName : (f.default || ''),
-      FIsAlter: f.readonly ? 0 : 1,
+      FIsAlter: (f.readonly || isAttachedTarget) ? 0 : 1,
       FIsAPAlter: 0,
       FDecPlaces: dt.FDataType === 'Decimal' ? 2 : (dt.FDataType === 'Int' ? 0 : -1),
       FLength: dt.FDataType === 'Varchar' ? 256 : 0,
@@ -939,6 +974,7 @@ export const BILL_DOWNSTREAM_REFS = {
     { table: 'T_MD_MainRecordEntry_A', head: 'T_MD_MainRecord', col: 'FMtrlNumber', match: 'code', entry: true },
   ],
   '203110': [
+    { table: 'T_MD_ChkSchedEntry', head: 'T_MD_ChkSched', col: 'FChkItemNumber', match: 'code', entry: true },
     { table: 'T_MD_CheckTaskEntry', head: 'T_MD_CheckTask', col: 'FChkItemNumber', match: 'code', entry: true },
     { table: 'T_MD_CheckRecordEntry', head: 'T_MD_CheckRecord', col: 'FChkItemNumber', match: 'code', entry: true },
   ],
@@ -947,6 +983,7 @@ export const BILL_DOWNSTREAM_REFS = {
     { table: 'T_MD_CheckRecord', col: 'FScheNumber', match: 'code' },
   ],
   '203120': [
+    { table: 'T_MD_MainSchedEntry', head: 'T_MD_MainSched', col: 'FMainItemNumber', match: 'code', entry: true },
     { table: 'T_MD_MainTaskEntry', head: 'T_MD_MainTask', col: 'FMainItemNumber', match: 'code', entry: true },
     { table: 'T_MD_MainRecordEntry', head: 'T_MD_MainRecord', col: 'FMainItemNumber', match: 'code', entry: true },
   ],
@@ -1002,6 +1039,11 @@ export function pageBodyRowToContract(strFunc, tab, row) {
     if (f.dbCol === 'FInterID' || f.dbCol === 'FEntryID') continue
     if (Object.prototype.hasOwnProperty.call(row, f.dbCol)) out[f.metaKey] = row[f.dbCol]
   }
+  if (String(strFunc) === '203151' && String(tab) === 'B1') {
+    const acc = Number(out['帐存数量']) || 0
+    const act = Number(out['盘点数量']) || 0
+    out['盈亏差额'] = Number((act - acc).toFixed(4))
+  }
   return out
 }
 
@@ -1015,6 +1057,11 @@ export function pageBodyContractToRow(strFunc, tab, contract) {
     if (!f || f.dbCol === 'FInterID' || f.dbCol === 'FEntryID') continue
     if (v === '' && /^(int|decimal)$/.test(f.type)) continue
     out[f.dbCol] = v === undefined ? null : v
+  }
+  if (String(strFunc) === '203151' && String(tab) === 'B1') {
+    const acc = Number(out.FAccountQty) || 0
+    const act = Number(out.FStocktakQty) || 0
+    out.FDiffQty = Number((act - acc).toFixed(4))
   }
   return out
 }

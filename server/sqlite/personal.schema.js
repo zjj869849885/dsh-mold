@@ -48,13 +48,13 @@ export const MOLD_FIELDS = [
   { metaKey: '标准产能', dbCol: 'FLevelCY', title: '标准产能(8H)', type: 'decimal' },
   { metaKey: '可用穴数', dbCol: 'FUsableCavity', title: '可用穴数', type: 'int' },
   { metaKey: '寿命报警线', dbCol: 'FLifeWarn', title: '寿命报警线', type: 'int' },
-  { metaKey: '剩余寿命', dbCol: 'FRemainLifeQty', title: '剩余寿命', type: 'int' },
+  { metaKey: '剩余寿命', dbCol: 'FRemainLifeQty', title: '剩余寿命', type: 'int', readonly: true, showReadonly: true },
   { metaKey: '金额', dbCol: 'FMDCost', title: '模具金额', type: 'decimal' },
   { metaKey: '设计寿命模次', dbCol: 'FDesignLife', title: '设计寿命', type: 'int' },
-  { metaKey: '已用模次', dbCol: 'used_shots', title: '已用模次', type: 'int' },
+  { metaKey: '已用模次', dbCol: 'used_shots', title: '已用模次', type: 'int', readonly: true, showReadonly: true },
   { metaKey: '模穴数', dbCol: 'cavity_count', title: '模穴数', type: 'int' },
   { metaKey: '保养周期模次', dbCol: 'maint_interval_shots', title: '保养周期', type: 'int' },
-  { metaKey: '上次保养模次', dbCol: 'last_maint_shots', title: '上次保养', type: 'int' },
+  { metaKey: '上次保养模次', dbCol: 'last_maint_shots', title: '上次保养', type: 'int', readonly: true, showReadonly: true },
   { metaKey: '备注', dbCol: 'remark', title: '备注', type: 'memo' },
   // 封面图（单图维护）：无 dbCol——base64 不进主档列，由 /save 提取 FImage → adapter.saveImage 落盘 mold_image。
   // 声明于 info（FORM_FIELDS）即触发前端 BillForm isImageType 控件（选择/更换/删除）；noList 排除于列表列。
@@ -68,7 +68,7 @@ export const LIST_FIELDS = MOLD_FIELDS.filter((f) => !f.hidden && !f.noList)
 
 /** BillForm 表头字段（契约）：隐藏键不进表头渲染（无 bodyheader 时前端按 Info 行全量落 fgrid）。 */
 /** BillForm 表头字段（契约）：showLock（使用组织）灰锁但保留展示，企业 FORGID 可见不可改同口径。 */
-export const FORM_FIELDS = MOLD_FIELDS.filter((f) => !f.hidden && (!f.readonly || f.showLock))
+export const FORM_FIELDS = MOLD_FIELDS.filter((f) => !f.hidden && (!f.readonly || f.showLock || f.showReadonly))
 
 /**
  * 数值型契约字段 metaKey 集合（type ∈ int/decimal）。
@@ -260,7 +260,7 @@ export function filterColOf(key) {
   return LIST_COL_BY_FILTER.get(String(key)) || LIST_COL_BY_FILTER.get(String(key).replace(/^H_H_/, '').replace(/_(From|To)$/, '')) || ''
 }
 
-/** 派生字段：剩余寿命%、距下次保养模次（预警/手机卡片进度条消费，不落库）。 */
+/** 派生字段：剩余寿命、剩余寿命%、距下次保养模次（详情/列表/预警/手机卡片消费，不落库）。 */
 export function withDerived(row) {
   const design = Number(row['设计寿命模次']) || 0
   const used = Number(row['已用模次']) || 0
@@ -268,6 +268,7 @@ export function withDerived(row) {
   const lastMaint = Number(row['上次保养模次']) || 0
   return {
     ...row,
+    剩余寿命: design > 0 ? Math.max(0, design - used) : 0,
     剩余寿命百分比: design > 0 ? Math.max(0, Math.round(((design - used) / design) * 100)) : null,
     距下次保养模次: interval > 0 ? Math.max(0, interval - Math.max(0, used - lastMaint)) : null,
   }

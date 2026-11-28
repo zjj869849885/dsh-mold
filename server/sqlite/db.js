@@ -46,6 +46,8 @@ export function migrate(db) {
   ensureBillStateColumns(db)
   ensureCreatorColumns(db)
   ensureSourceBillColumns(db)
+  ensureMoldExtraColumns(db)
+  ensureEnhancedSchema(db)
   return getUserVersion(db)
 }
 
@@ -97,6 +99,52 @@ export function ensureSourceBillColumns(db) {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => String(c.name))
     if (!cols.includes('FSourceBillNo')) db.prepare(`alter table ${table} add column FSourceBillNo TEXT DEFAULT ''`).run()
   }
+}
+
+/** 补齐模具档案周期/产能/可用穴数/寿命报警线列，使表单填写可完整落库并支持寿命预警（幂等安全）。 */
+export function ensureMoldExtraColumns(db) {
+  const cols = db.prepare('PRAGMA table_info(T_MD_Mould)').all().map((c) => String(c.name))
+  const add = [
+    ['FCycle', 'REAL NOT NULL DEFAULT 0'],
+    ['FDESCY', 'REAL NOT NULL DEFAULT 0'],
+    ['FLevelCY', 'REAL NOT NULL DEFAULT 0'],
+    ['FUsableCavity', 'INTEGER NOT NULL DEFAULT 0'],
+    ['FLifeWarn', 'INTEGER NOT NULL DEFAULT 0'],
+  ]
+  for (const [name, ddl] of add) {
+    if (!cols.includes(name)) db.prepare(`alter table T_MD_Mould add column ${name} ${ddl}`).run()
+  }
+}
+
+/** 扩展表结构（幂等）：点检/保养方案项目明细表、备件库存数量列、盘点盈亏差额列。 */
+export function ensureEnhancedSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS T_MD_ChkSchedEntry (
+      FEntryID INTEGER PRIMARY KEY AUTOINCREMENT,
+      FInterID INTEGER NOT NULL,
+      FChkItemType TEXT DEFAULT '',
+      FChkItemNumber TEXT DEFAULT '',
+      FChkItem TEXT DEFAULT '',
+      FChkAsk TEXT DEFAULT '',
+      FChkStandard TEXT DEFAULT '',
+      FNote TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_chksched_entry_head ON T_MD_ChkSchedEntry(FInterID);
+    CREATE TABLE IF NOT EXISTS T_MD_MainSchedEntry (
+      FEntryID INTEGER PRIMARY KEY AUTOINCREMENT,
+      FInterID INTEGER NOT NULL,
+      FMainItemType TEXT DEFAULT '',
+      FMainItemNumber TEXT DEFAULT '',
+      FMainItem TEXT DEFAULT '',
+      FMainAsk TEXT DEFAULT '',
+      FNote TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_mainsched_entry_head ON T_MD_MainSchedEntry(FInterID);
+  `)
+  const spareCols = db.prepare('PRAGMA table_info(T_MD_Spare)').all().map((c) => String(c.name))
+  if (!spareCols.includes('qty')) db.prepare('alter table T_MD_Spare add column qty REAL NOT NULL DEFAULT 0').run()
+  const stCols = db.prepare('PRAGMA table_info(T_MD_StocktakingEntry)').all().map((c) => String(c.name))
+  if (!stCols.includes('FDiffQty')) db.prepare('alter table T_MD_StocktakingEntry add column FDiffQty REAL NOT NULL DEFAULT 0').run()
 }
 /** 打开（或首启创建）本地库：建目录树 → PRAGMA → 迁移。返回 { db, dataDir, dbPath }。 */
 export function openDatabase(dataDirOpt) {
